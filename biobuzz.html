@@ -3998,7 +3998,7 @@ async function sha256Hex(str) {
      echo -n "YOUR_NEW_PIN" | shasum -a 256 | cut -d' ' -f1
    and paste the output here. Any PIN previously saved to a device's own
    localStorage (from before this change) is no longer read at all. */
-let LEAD_PIN_HASH = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4'; // sha256("1234") — CHANGE THIS
+let LEAD_PIN_HASH = '07c903ce633842c12f7430406521a6d57fd72de978b2c667a5bf8ec2cc7f9a9c'; // sha256("8462")
 let deviceRole = (() => { try { return localStorage.getItem(LS_ROLE) || 'scouter'; } catch(e) { return 'scouter'; } })();
 function applyRoleUI() {
   document.body.classList.toggle('role-lead', deviceRole === 'lead');
