@@ -4085,7 +4085,14 @@ document.getElementById('meBtn').addEventListener('click', () => {
 document.getElementById('meCloseBtn').addEventListener('click', () => {
   document.getElementById('meSheet').style.display = 'none';
 });
-document.getElementById('meSendQrBtn').addEventListener('click', () => openQrForEntries(matches.filter(m => !m.sent), pits.filter(p => !p.sent)));
+document.getElementById('meSendQrBtn').addEventListener('click', () => {
+  // meSheet sits after qrOverlay in the DOM, so at the same z-index it
+  // paints on top and swallows every click on the QR overlay underneath
+  // unless it's closed first — a scouter tapping this would see nothing
+  // happen at all.
+  document.getElementById('meSheet').style.display = 'none';
+  openQrForEntries(matches.filter(m => !m.sent), pits.filter(p => !p.sent));
+});
 
 // Alliance tips are only meaningful from whichever scout is tracking the
 // WHOLE alliance's hive tips — by convention, Red 1 / Blue 1.
