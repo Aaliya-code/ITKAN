@@ -436,6 +436,8 @@
   table.sortable-table { white-space: nowrap; }
   table.sortable-table th { cursor: pointer; user-select: none; }
   table.sortable-table th .arrow { font-size: 9px; margin-left: 2px; opacity: .7; }
+  tr.rankings-row { cursor: pointer; }
+  tr.rankings-row:active { background: rgba(255,255,255,.06); }
   table.sticky-col th:first-child, table.sticky-col td:first-child {
     position: sticky; left: 0; background: var(--surface); z-index: 2;
     box-shadow: 2px 0 4px rgba(0,0,0,.35);
@@ -778,6 +780,7 @@
       <div class="switch" id="includePracticeToggle"></div>
     </div>
     <div class="step-nav">
+      <button data-dstep="rankings">Rankings</button>
       <button data-dstep="matches" class="active">Matches</button>
       <button data-dstep="averages">Averages</button>
       <button data-dstep="byteam">By Team</button>
@@ -785,6 +788,13 @@
       <button data-dstep="compat">Compatibility</button>
       <button data-dstep="picker">Picker</button>
       <button data-dstep="pit">Pit</button>
+    </div>
+
+    <div id="dstep-rankings" class="step">
+      <div class="hint" id="rankingsStatus" style="margin-bottom:8px;"></div>
+      <div class="card table-scroll-card">
+        <table id="rankingsTable" class="sortable-table sticky-col"></table>
+      </div>
     </div>
 
     <div id="dstep-matches" class="step active">
@@ -2670,6 +2680,7 @@ document.getElementById('pitEditingCancelBtn').addEventListener('click', () => {
 /* ══════════ DATA RENDERING ══════════ */
 function renderData() {
   renderViewEventFilterLabel();
+  renderRankings();
   renderMatchList();
   renderAverages();
   renderTeamSelect();
@@ -2791,6 +2802,9 @@ function getOfficialStats(teamNumber) {
     rank: (stats && stats.rank != null) ? stats.rank : null,
     rp: (stats && stats.rp != null) ? stats.rp : null,
     opr: (stats && stats.opr != null) ? stats.opr : null,
+    wins: (stats && stats.wins != null) ? stats.wins : null,
+    losses: (stats && stats.losses != null) ? stats.losses : null,
+    ties: (stats && stats.ties != null) ? stats.ties : null,
   };
 }
 const AVG_COLUMNS = [
@@ -2834,13 +2848,87 @@ function renderAverages() {
   });
 }
 
+// Every team FTCScout (or, failing that, the imported schedule) knows
+// about for the current event — not just the ones we've scouted — so a
+// team nobody's scouted yet still shows up with official-only stats.
+const RANKINGS_COLUMNS = [
+  { key: 'team',    label: 'Team',     fmt: r => `#${esc(r.team)}${r.teamName ? ' — ' + esc(r.teamName) : ''}` },
+  { key: 'rank',    label: 'Rank',     fmt: r => r.rank === null ? '—' : r.rank, val: r => r.rank === null ? -9999 : -r.rank },
+  { key: 'rp',      label: 'RP',       fmt: r => r.rp === null ? '—' : r.rp.toFixed(1), val: r => r.rp === null ? -1 : r.rp },
+  { key: 'wlt',     label: 'W-L-T',    fmt: r => r.wins === null ? '—' : `${r.wins}-${r.losses}-${r.ties}`, val: r => r.wins === null ? -1 : r.wins },
+  { key: 'opr',     label: 'OPR',      fmt: r => r.opr === null ? '—' : r.opr.toFixed(1), val: r => r.opr === null ? -1 : r.opr },
+  { key: 'matches', label: 'Matches',  fmt: r => r.matches },
+  { key: 'avgTotal',label: 'Avg Total',fmt: r => r.matches ? r.avgTotal.toFixed(1) : '—', val: r => r.matches ? r.avgTotal : -1 },
+  { key: 'avgAuto', label: 'Auto',     fmt: r => r.matches ? r.avgAuto.toFixed(1) : '—', val: r => r.matches ? r.avgAuto : -1 },
+];
+let rankingsSortKey = 'rank', rankingsSortDir = -1; // -rank, descending -> best rank (1) first
+
+function rankingsRows() {
+  const pool = rankableMatches();
+  return getEventTeamList().map(({ n, nm }) => {
+    const official = getOfficialStats(n);
+    const stats = computeTeamStats(pool.filter(m => normTeam(m.teamNumber) === n));
+    return { team: n, teamName: nm, ...official, matches: stats.matches, avgTotal: stats.avgTotal, avgAuto: stats.avgAuto };
+  });
+}
+
+function openByTeamFromRankings(team) {
+  const tab = document.querySelector('#page-data .step-nav button[data-dstep="byteam"]');
+  if (tab) tab.click();
+  const sel = document.getElementById('teamSelect');
+  if (sel && [...sel.options].some(o => o.value === team)) {
+    sel.value = team;
+    renderTeamDetail();
+  }
+}
+
+function renderRankings() {
+  const statusEl = document.getElementById('rankingsStatus');
+  const table = document.getElementById('rankingsTable');
+  if (!eventData.eventCode) {
+    statusEl.textContent = 'No event selected — pick an event in Export > FTCScout, or import a CSV schedule, to see Rankings.';
+    table.innerHTML = '';
+    return;
+  }
+  const lines = [`${eventData.eventName || eventData.eventCode} (${eventData.eventCode})`];
+  lines.push(eventData.lastUpdated ? `Last updated ${new Date(eventData.lastUpdated).toLocaleString()}` : 'Never fetched yet');
+  if (eventData.lastError) lines.push(`⚠ FTCScout unavailable — showing saved data (${eventData.lastError})`);
+  statusEl.innerHTML = lines.map(esc).join('<br>');
+
+  const rows = rankingsRows();
+  if (!rows.length) { table.innerHTML = '<tr><td class="empty-state" style="border:none;">No teams yet for this event.</td></tr>'; return; }
+  const col = RANKINGS_COLUMNS.find(c => c.key === rankingsSortKey) || RANKINGS_COLUMNS[1];
+  const valOf = col.val || (r => Number(r[col.key]) || 0);
+  rows.sort((a, b) => (valOf(a) - valOf(b)) * rankingsSortDir);
+  table.innerHTML = `
+    <tr>${RANKINGS_COLUMNS.map(c => `<th data-sortkey="${c.key}">${c.label}${rankingsSortKey === c.key ? `<span class="arrow">${rankingsSortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`).join('')}</tr>
+    ${rows.map(r => `<tr data-team="${esc(r.team)}" class="rankings-row">${RANKINGS_COLUMNS.map(c => `<td${c.key === 'team' ? '' : ' class="num"'}>${c.fmt(r)}</td>`).join('')}</tr>`).join('')}
+  `;
+  table.querySelectorAll('th[data-sortkey]').forEach(th => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.sortkey;
+      if (rankingsSortKey === k) rankingsSortDir *= -1; else { rankingsSortKey = k; rankingsSortDir = -1; }
+      renderRankings();
+    });
+  });
+  table.querySelectorAll('tr.rankings-row').forEach(tr => {
+    tr.addEventListener('click', () => openByTeamFromRankings(tr.dataset.team));
+  });
+}
+
 // Teams are grouped by normTeam() (task 7) — "04321" and "4321" are one
 // team. The dropdown shows whichever raw spelling was typed most recently.
 function renderTeamSelect() {
   const sel = document.getElementById('teamSelect');
-  const teams = [...new Set(matches.map(m => normTeam(m.teamNumber)))].sort((a, b) => Number(a) - Number(b));
+  // Includes every event team FTCScout/the schedule knows about, not just
+  // ones we've scouted — an unscouted team still needs to be pickable so
+  // its official stats + pit info (if any) are visible before match day.
+  const names = {};
+  getEventTeamList().forEach(({ n, nm }) => { if (nm) names[n] = nm; });
+  const teams = [...new Set([...matches.map(m => normTeam(m.teamNumber)), ...getEventTeamList().map(t => t.n)])]
+    .filter(Boolean).sort((a, b) => Number(a) - Number(b));
   const current = sel.value;
-  sel.innerHTML = '<option value="">Select a team...</option>' + teams.map(norm => `<option value="${esc(norm)}">#${esc(norm)}</option>`).join('');
+  sel.innerHTML = '<option value="">Select a team...</option>' + teams.map(norm => `<option value="${esc(norm)}">#${esc(norm)}${names[norm] ? ' — ' + esc(names[norm]) : ''}</option>`).join('');
   if (teams.includes(current)) sel.value = current;
   sel.onchange = renderTeamDetail;
   renderTeamDetail();
@@ -2936,14 +3024,11 @@ function renderTeamDetail() {
       `).join('')}
     </table>`;
   const official = getOfficialStats(team);
-  el.innerHTML = `
-    <div class="card">
-      <div class="card-title">Team #${esc(team)} Summary${includePractice ? '' : ' (excl. Practice)'}</div>
-      <div class="entry-stats" style="font-size:13px;color:var(--text-dim);">
-        <span>Official Rank: <b>${official.rank === null ? '—' : official.rank}</b></span>
-        <span>Official RP: <b>${official.rp === null ? '—' : official.rp.toFixed(1)}</b></span>
-        <span>Official OPR: <b>${official.opr === null ? '—' : official.opr.toFixed(1)}</b></span>
-      </div>
+  const teamNameEntry = getEventTeamList().find(t => t.n === team);
+  const teamTitle = `Team #${esc(team)}${teamNameEntry && teamNameEntry.nm ? ' — ' + esc(teamNameEntry.nm) : ''}`;
+  const scoutedBlock = stats.matches === 0 ? `
+      <div class="hint" style="margin-top:4px;">Not scouted yet.</div>
+  ` : `
       <div class="entry-stats" style="font-size:13px;">
         <span>Matches (scouted): <b>${stats.matches}</b></span>
         <span>Leave: <b>${stats.leavePct.toFixed(0)}%</b></span>
@@ -2960,6 +3045,17 @@ function renderTeamDetail() {
       </div>
       <h2 class="section-title" style="margin:10px 0 4px;font-size:12px;">Point Breakdown</h2>
       <div class="table-scroll-card" style="margin:0 -14px -14px;">${pointStatsTable}</div>
+  `;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title">${teamTitle} Summary${includePractice ? '' : ' (excl. Practice)'}</div>
+      <div class="entry-stats" style="font-size:13px;color:var(--text-dim);">
+        <span>Official Rank: <b>${official.rank === null ? '—' : official.rank}</b></span>
+        <span>Official RP: <b>${official.rp === null ? '—' : official.rp.toFixed(1)}</b></span>
+        <span>Official W-L-T: <b>${official.wins === null ? '—' : `${official.wins}-${official.losses}-${official.ties}`}</b></span>
+        <span>Official OPR: <b>${official.opr === null ? '—' : official.opr.toFixed(1)}</b></span>
+      </div>
+      ${scoutedBlock}
     </div>
     ${pitInfoCardHtml(mergedPit)}
     <div class="card">
@@ -4369,6 +4465,11 @@ function getEventTeamList() {
        own UI displays as "OPR" — `totalPoints` (which includes penalty
        contributions) reads close but measurably different, confirmed by
        comparing against the live site.
+     - `wins`/`losses`/`ties` (added 2026-10-18, for the Rankings view)
+       live as plain Int fields directly on `TeamEventStats2026` itself
+       (siblings of `rank`/`rp`, not nested) — confirmed via live schema
+       introspection and cross-checked against a real 2026-season event
+       (rank-1 team had a 5-0-0 record, consistent with its rank).
    Every failure mode here is still handled defensively: a bad field name
    or a season/event with no stats yet surfaces as null/an "errors" entry,
    treated like a network failure — the cache is never wiped, only
@@ -4402,7 +4503,7 @@ const EVENT_DETAIL_QUERY = `query($season: Int!, $code: String!) {
 // the GAME starts in, same convention as the `season` query variable).
 const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
   eventByCode(season: $season, code: $code) {
-    teams { team { number } stats { ... on TeamEventStats2026 { rank rp opr { totalPointsNp } } } }
+    teams { team { number } stats { ... on TeamEventStats2026 { rank rp wins losses ties opr { totalPointsNp } } } }
   }
 }`;
 async function searchFTCScoutEvents(season, searchText) {
@@ -4457,9 +4558,12 @@ async function fetchEventData(silent) {
         rank: t.stats.rank != null ? t.stats.rank : null,
         rp: t.stats.rp != null ? t.stats.rp : null,
         opr: (t.stats.opr && t.stats.opr.totalPointsNp != null) ? t.stats.opr.totalPointsNp : null,
+        wins: t.stats.wins != null ? t.stats.wins : null,
+        losses: t.stats.losses != null ? t.stats.losses : null,
+        ties: t.stats.ties != null ? t.stats.ties : null,
       };
     });
-  } catch (err) { /* rank/RP/OPR left as whatever was cached before — not fatal, core event data above is unaffected */ }
+  } catch (err) { /* rank/RP/OPR/W-L-T left as whatever was cached before — not fatal, core event data above is unaffected */ }
   if (coreOk) eventData.lastUpdated = new Date().toISOString();
   saveEventData();
   renderSchedulePreview();
@@ -5121,9 +5225,13 @@ const COMPAT_COLOR_OURS = '#00e5ff', COMPAT_COLOR_THEIRS = '#ff4d6d';
 function renderCompatTeamSelect() {
   const sel = document.getElementById('compatTeamSelect');
   const ourNorm = normTeam(ourTeamNumber);
-  const teams = [...new Set(matches.map(m => normTeam(m.teamNumber)))].filter(norm => norm !== ourNorm).sort((a, b) => Number(a) - Number(b));
+  // Same "every event team, not just scouted ones" rule as renderTeamSelect.
+  const names = {};
+  getEventTeamList().forEach(({ n, nm }) => { if (nm) names[n] = nm; });
+  const teams = [...new Set([...matches.map(m => normTeam(m.teamNumber)), ...getEventTeamList().map(t => t.n)])]
+    .filter(norm => norm && norm !== ourNorm).sort((a, b) => Number(a) - Number(b));
   const current = sel.value;
-  sel.innerHTML = '<option value="">Select a team...</option>' + teams.map(norm => `<option value="${esc(norm)}">#${esc(norm)}</option>`).join('');
+  sel.innerHTML = '<option value="">Select a team...</option>' + teams.map(norm => `<option value="${esc(norm)}">#${esc(norm)}${names[norm] ? ' — ' + esc(names[norm]) : ''}</option>`).join('');
   if (teams.includes(current)) sel.value = current;
   sel.onchange = renderCompatDetail;
   renderCompatDetail();
@@ -5240,6 +5348,11 @@ function renderCompatDetail() {
   const ourOfficial = getOfficialStats(ourNorm);
   const theirOfficial = getOfficialStats(theirNorm);
   const offTxt = (v) => v === null ? '—' : (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(1) : v);
+  const wltTxt = (o) => o.wins === null ? '—' : `${o.wins}-${o.losses}-${o.ties}`;
+  // A side with zero scouted matches shows "Not scouted yet" in place of
+  // every scouted-stat cell for that side, rather than a misleadingly
+  // precise "0.0"/"0%".
+  const scouted = (stats, text) => stats.matches === 0 ? 'Not scouted yet' : text;
 
   el.innerHTML = `
     ${conflicts.length ? `<div class="setup-warning">⚠ Autos may conflict: ${esc(conflicts.join('; '))}</div>` : ''}
@@ -5249,16 +5362,17 @@ function renderCompatDetail() {
         <tr><th></th><th class="num">Us</th><th class="num">Them</th></tr>
         ${compatRow('Official Rank', offTxt(ourOfficial.rank), offTxt(theirOfficial.rank))}
         ${compatRow('Official RP', offTxt(ourOfficial.rp), offTxt(theirOfficial.rp))}
+        ${compatRow('Official W-L-T', wltTxt(ourOfficial), wltTxt(theirOfficial))}
         ${compatRow('Official OPR', offTxt(ourOfficial.opr), offTxt(theirOfficial.opr))}
-        ${compatRow('Avg Total (scouted)', ourStats.avgTotal.toFixed(1), theirStats.avgTotal.toFixed(1))}
-        ${compatRow('Avg Auto', ourStats.avgAuto.toFixed(1), theirStats.avgAuto.toFixed(1))}
-        ${compatRow('Last-3', ourStats.total.last3.toFixed(1), theirStats.total.last3.toFixed(1))}
-        ${compatRow('Leave%', ourStats.leavePct.toFixed(0)+'%', theirStats.leavePct.toFixed(0)+'%')}
-        ${compatRow('Park%', ourStats.parkPct.toFixed(0)+'%', theirStats.parkPct.toFixed(0)+'%')}
-        ${compatRow('Driver', ratingTxt(ourStats.avgRatingDriver), ratingTxt(theirStats.avgRatingDriver))}
-        ${compatRow('Defense Quality', ratingTxt(ourStats.avgRatingDefense), ratingTxt(theirStats.avgRatingDefense))}
-        ${compatRow('Cards (Y/R)', `${ourStats.cardCounts.Yellow}/${ourStats.cardCounts.Red}`, `${theirStats.cardCounts.Yellow}/${theirStats.cardCounts.Red}`)}
-        ${compatRow('Broke Down%', ourStats.brokeDownPct.toFixed(0)+'%', theirStats.brokeDownPct.toFixed(0)+'%')}
+        ${compatRow('Avg Total (scouted)', scouted(ourStats, ourStats.avgTotal.toFixed(1)), scouted(theirStats, theirStats.avgTotal.toFixed(1)))}
+        ${compatRow('Avg Auto', scouted(ourStats, ourStats.avgAuto.toFixed(1)), scouted(theirStats, theirStats.avgAuto.toFixed(1)))}
+        ${compatRow('Last-3', scouted(ourStats, ourStats.total.last3.toFixed(1)), scouted(theirStats, theirStats.total.last3.toFixed(1)))}
+        ${compatRow('Leave%', scouted(ourStats, ourStats.leavePct.toFixed(0)+'%'), scouted(theirStats, theirStats.leavePct.toFixed(0)+'%'))}
+        ${compatRow('Park%', scouted(ourStats, ourStats.parkPct.toFixed(0)+'%'), scouted(theirStats, theirStats.parkPct.toFixed(0)+'%'))}
+        ${compatRow('Driver', scouted(ourStats, ratingTxt(ourStats.avgRatingDriver)), scouted(theirStats, ratingTxt(theirStats.avgRatingDriver)))}
+        ${compatRow('Defense Quality', scouted(ourStats, ratingTxt(ourStats.avgRatingDefense)), scouted(theirStats, ratingTxt(theirStats.avgRatingDefense)))}
+        ${compatRow('Cards (Y/R)', scouted(ourStats, `${ourStats.cardCounts.Yellow}/${ourStats.cardCounts.Red}`), scouted(theirStats, `${theirStats.cardCounts.Yellow}/${theirStats.cardCounts.Red}`))}
+        ${compatRow('Broke Down%', scouted(ourStats, ourStats.brokeDownPct.toFixed(0)+'%'), scouted(theirStats, theirStats.brokeDownPct.toFixed(0)+'%'))}
       </table>
       <div class="entry-stats" style="font-size:13px;margin-top:10px;">
         <span>Combined Projected Score: <b>${(ourStats.avgTotal + theirStats.avgTotal).toFixed(1)}</b></span>
@@ -6640,6 +6754,50 @@ async function runSelfTests() {
       record('Lead backup: full backup → fresh device → restore → identical data views (matches, pits, schedule, event data)', pass,
         JSON.stringify({ matchRestored, pitRestored, scheduleRestored, eventDataRestored, dataViewsIdentical }));
     } catch (err) { record('Lead backup: full backup → fresh device → restore → identical data views (matches, pits, schedule, event data)', false, err.message); }
+
+    // Rankings: lists every FTCScout-known team at the event (not just
+    // scouted ones) sorted by official rank, with "—" for scouted columns
+    // on a team nobody's scouted yet. Tapping a row opens By Team with
+    // that team selected, and an unscouted team is still pickable there.
+    try {
+      const savedEventData = JSON.parse(JSON.stringify(eventData));
+      const activeDstepBtn = document.querySelector('#page-data .step-nav button.active');
+      const activeDstep = activeDstepBtn ? activeDstepBtn.dataset.dstep : 'matches';
+
+      eventData.eventCode = 'RANKTEST'; eventData.season = 2026; eventData.eventName = 'Ranking Test Event';
+      eventData.teams = [
+        { number: '9001', name: 'Alpha' }, { number: '9002', name: 'Beta' }, { number: '9003', name: 'Gamma' },
+      ];
+      eventData.teamStats = {
+        '9001': { rank: 1, rp: 10, opr: 50, wins: 5, losses: 0, ties: 0 },
+        '9002': { rank: 2, rp: 8, opr: 40, wins: 4, losses: 1, ties: 0 },
+        '9003': { rank: 3, rp: 2, opr: 10, wins: 1, losses: 4, ties: 0 },
+      };
+      renderData();
+
+      const rows = [...document.querySelectorAll('#rankingsTable tr.rankings-row')];
+      const order = rows.map(r => r.dataset.team);
+      const listedInOfficialOrder = order[0] === '9001' && order[1] === '9002' && order[2] === '9003';
+      const zeroScoutedShown = rows.every(r => r.querySelector('td:nth-child(6)').textContent === '0'); // Matches column
+      const dashForUnscouted = rows.every(r => r.querySelector('td:nth-child(7)').textContent === '—'); // Avg Total column
+
+      openByTeamFromRankings('9002');
+      const byTeamTabActive = document.getElementById('dstep-byteam').classList.contains('active');
+      const teamSelected = document.getElementById('teamSelect').value === '9002';
+      const notScoutedShown = document.getElementById('teamDetail').textContent.includes('Not scouted yet');
+      const officialRankShown = /Official Rank:\s*<b>\s*2\s*<\/b>/.test(document.getElementById('teamDetail').innerHTML);
+
+      const unscoutedInDropdown = [...document.getElementById('teamSelect').options].some(o => o.value === '9001');
+
+      const pass = listedInOfficialOrder && zeroScoutedShown && dashForUnscouted &&
+        byTeamTabActive && teamSelected && notScoutedShown && officialRankShown && unscoutedInDropdown;
+      record('Rankings: every event team listed in official order with "—" for unscouted stats; tapping opens By Team with that team selected and "Not scouted yet"; unscouted teams appear in the By Team dropdown', pass,
+        JSON.stringify({ order, listedInOfficialOrder, zeroScoutedShown, dashForUnscouted, byTeamTabActive, teamSelected, notScoutedShown, officialRankShown, unscoutedInDropdown }));
+
+      eventData = savedEventData;
+      if (activeDstepBtn) activeDstepBtn.click(); else document.querySelector('#page-data .step-nav button[data-dstep="matches"]').click();
+      renderData();
+    } catch (err) { record('Rankings: every event team listed in official order with "—" for unscouted stats; tapping opens By Team with that team selected and "Not scouted yet"; unscouted teams appear in the By Team dropdown', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
