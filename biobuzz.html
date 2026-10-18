@@ -759,6 +759,20 @@
 
   <!-- ══════════ DATA PAGE ══════════ -->
   <section id="page-data" class="page">
+    <div class="card" id="leadBackupCard">
+      <div class="card-title">Back Up This Device</div>
+      <div class="hint">Downloads everything on this device — matches, pits, photos, schedule, and event data — as one file. Restoring it on another phone makes that phone a complete copy of this one.</div>
+      <button class="btn btn-primary" id="backupNowBtn">⬇ Back Up Now</button>
+      <div class="hint" id="lastBackupHint" style="margin-top:8px;">No backup yet.</div>
+      <div class="setup-warning" id="backupReminderBanner" style="display:none;margin-top:8px;"></div>
+    </div>
+    <div class="field" style="margin-bottom:12px;">
+      <label>Viewing</label>
+      <select id="viewEventFilterSelect">
+        <option value="current">Current Event</option>
+        <option value="all">All Events</option>
+      </select>
+    </div>
     <div class="toggle-row" style="margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;">
       <div><span class="tname">Include Practice Matches</span><span class="tpoints">excluded from averages/rankings by default</span></div>
       <div class="switch" id="includePracticeToggle"></div>
@@ -1354,7 +1368,20 @@ function migrateV5ToV6(m) {
   return true;
 }
 
-// Full v1->...->v6 pipeline for one match entry — used by both the on-load
+// v6 -> v7: event tagging. An entry with no event tag is treated as one
+// shared "Unassigned" bucket (eventCode: '') rather than many different
+// unknown events — matchKeyOf() and every function built on it include
+// eventCode, so this is what keeps all pre-event-tagging history grouped
+// together instead of each legacy entry looking like its own island.
+function migrateV6ToV7(m) {
+  if (m.schemaVersion >= 7) return false;
+  if (m.eventCode === undefined) m.eventCode = '';
+  if (m.season === undefined) m.season = null;
+  m.schemaVersion = 7;
+  return true;
+}
+
+// Full v1->...->v7 pipeline for one match entry — used by both the on-load
 // migration and backup/QR import (so an old backup gets upgraded the same
 // way).
 async function migrateEntryFull(m) {
@@ -1364,6 +1391,7 @@ async function migrateEntryFull(m) {
   if (migrateV3ToV4(m)) changed = true;
   if (migrateV4ToV5(m)) changed = true;
   if (migrateV5ToV6(m)) changed = true;
+  if (migrateV6ToV7(m)) changed = true;
   return changed;
 }
 
@@ -1410,10 +1438,20 @@ function migratePitEntryV3(p) {
   p.schemaVersion = 3;
   return true;
 }
+// v3 -> v4: event tagging (same "Unassigned" bucket convention as match
+// entries' v6->v7 — see that migration's comment).
+function migratePitEntryV4(p) {
+  if (p.schemaVersion >= 4) return false;
+  if (p.eventCode === undefined) p.eventCode = '';
+  if (p.season === undefined) p.season = null;
+  p.schemaVersion = 4;
+  return true;
+}
 async function migratePitEntryFull(p) {
   let changed = false;
   if (await migratePitEntry(p)) changed = true;
   if (migratePitEntryV3(p)) changed = true;
+  if (migratePitEntryV4(p)) changed = true;
   return changed;
 }
 async function runMigration() {
@@ -1458,6 +1496,7 @@ const blankDraft = () => ({
   notes: '',
   startX: null, startY: null, startTile: '',
   autoPathStrokes: [],
+  eventCode: '', season: null, // stamped from eventData by stampCurrentEvent() wherever a FRESH draft is created — left blank here so edit/restore spreads over it with the original entry's own event, not today's
 });
 let draft = blankDraft();
 
@@ -1472,6 +1511,7 @@ const blankPit = () => ({
   routines: [],
   preferredSide: '', driverPractice: '',
   notes: '', photoIds: [], sent: false,
+  eventCode: '', season: null, // see blankDraft()'s identical comment
 });
 let pitDraft = blankPit();
 
@@ -1500,7 +1540,14 @@ function pitDraftHasData(d) {
    robot is credited a SHARE of the alliance's points based on what it
    personally contributed relative to its scouted partner(s). */
 
-function matchKeyOf(m) { return `${m.matchType || 'Qualification'}|${m.matchNumber}`; }
+// Includes eventCode so "Qual 1" at two different events is never the same
+// match — used for alliance reconciliation/partner lookup (via
+// allianceEntriesFor), duplicate ⚠ detection, the Alliance view's match
+// list, and the team overlay's per-match legend. '' (Unassigned) is its
+// own distinct event, same as any real one — two Unassigned matches both
+// numbered "Qual 1" still correctly collide with each other, just not
+// with a real event's "Qual 1".
+function matchKeyOf(m) { return `${m.matchType || 'Qualification'}|${m.matchNumber}|${m.eventCode || ''}`; }
 function matchLabelOf(m) { return `${m.matchType || 'Qualification'} ${m.matchNumber}`; }
 
 function allianceEntriesFor(allMatches, m) {
@@ -1634,7 +1681,41 @@ function fmtAcc(p) { return p === null ? '—' : p.toFixed(0) + '%'; }
 /* ══════════ PRACTICE EXCLUSION + MATCH ORDERING (task 7) ══════════ */
 const LS_INCLUDE_PRACTICE = 'biobuzz2026_includepractice';
 let includePractice = (() => { try { return localStorage.getItem(LS_INCLUDE_PRACTICE) === '1'; } catch(e) { return false; } })();
-function rankableMatches() { return includePractice ? matches : matches.filter(m => m.matchType !== 'Practice'); }
+// Data-view event filter: 'current' (default) scopes Averages/By Team/
+// Compatibility/Picker/Alliance to whichever event this device has
+// selected right now (eventData.eventCode, '' meaning Unassigned, same as
+// everything else here); 'all' combines every event for season-long team
+// history.
+const LS_VIEW_EVENT_FILTER = 'biobuzz2026_vieweventfilter';
+let viewEventFilter = (() => { try { return localStorage.getItem(LS_VIEW_EVENT_FILTER) || 'current'; } catch(e) { return 'current'; } })();
+const LS_LAST_BACKUP_AT = 'biobuzz2026_lastbackupat';
+let lastBackupAt = (() => { try { return localStorage.getItem(LS_LAST_BACKUP_AT) || null; } catch(e) { return null; } })();
+// Entries with no backup yet all count as "changed" — a brand-new device
+// with >10 entries and no backup should still get the reminder banner.
+function countChangedSinceBackup() {
+  if (!lastBackupAt) return matches.length + pits.length;
+  const isNew = (e) => (e.updatedAt || e.ts || '') > lastBackupAt;
+  return matches.filter(isNew).length + pits.filter(isNew).length;
+}
+function renderBackupStatus() {
+  const hint = document.getElementById('lastBackupHint');
+  if (hint) hint.textContent = lastBackupAt ? `Last backup: ${new Date(lastBackupAt).toLocaleString()}` : 'No backup yet.';
+  const banner = document.getElementById('backupReminderBanner');
+  if (!banner) return;
+  const changed = countChangedSinceBackup();
+  if (changed > 10) {
+    banner.textContent = `${changed} new or updated entries since your last backup — back up now to be safe.`;
+    banner.style.display = '';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+function rankableMatches() {
+  const pool = includePractice ? matches : matches.filter(m => m.matchType !== 'Practice');
+  if (viewEventFilter === 'all') return pool;
+  const cur = eventData.eventCode || '';
+  return pool.filter(m => (m.eventCode || '') === cur);
+}
 const MATCH_TYPE_ORDER = { Practice: 0, Qualification: 1, Playoff: 2 };
 function sortByMatchOrder(entries) {
   return [...entries].sort((a, b) => {
@@ -1720,6 +1801,19 @@ document.getElementById('includePracticeToggle').addEventListener('click', (e) =
   try { localStorage.setItem(LS_INCLUDE_PRACTICE, includePractice ? '1' : '0'); } catch(err) {}
   renderData();
 });
+
+document.getElementById('viewEventFilterSelect').value = viewEventFilter;
+document.getElementById('viewEventFilterSelect').addEventListener('change', (e) => {
+  viewEventFilter = e.target.value;
+  try { localStorage.setItem(LS_VIEW_EVENT_FILTER, viewEventFilter); } catch(err) {}
+  renderData();
+});
+function renderViewEventFilterLabel() {
+  const opt = document.querySelector('#viewEventFilterSelect option[value="current"]');
+  if (!opt) return;
+  const label = eventData.eventCode ? (eventData.eventName || eventData.eventCode) : 'Unassigned';
+  opt.textContent = `Current Event (${label})`;
+}
 
 /* ══════════ NAV ══════════ */
 document.querySelectorAll('nav button').forEach(btn => {
@@ -1870,6 +1964,7 @@ function resetScoutForm() {
   document.getElementById('postSaveQrBanner').style.display = 'none';
   draft = blankDraft();
   draft.scouter = persistedScouter;
+  stampCurrentEvent(draft);
   document.getElementById('f-matchNumber').value = '';
   document.getElementById('f-teamNumber').value = '';
   document.getElementById('f-scouter').value = persistedScouter;
@@ -2029,10 +2124,10 @@ async function performActualSave() {
     const now = new Date().toISOString();
     let savedEntry, next;
     if (editingId) {
-      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 6, id: editingId, ts: oldEntry ? oldEntry.ts : now, updatedAt: now, sent: false };
+      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 7, id: editingId, ts: oldEntry ? oldEntry.ts : now, updatedAt: now, sent: false };
       next = matches.map(m => String(m.id) === String(editingId) ? savedEntry : m);
     } else {
-      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 6, id: newEntryId(), ts: now, updatedAt: now, sent: false };
+      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 7, id: newEntryId(), ts: now, updatedAt: now, sent: false };
       next = [...matches, savedEntry];
     }
     const ok = save(LS_MATCHES, next);
@@ -2489,6 +2584,7 @@ function renderPitTeamSuggestions() {
 function resetPitForm() {
   document.getElementById('pitDupWarning').style.display = 'none';
   pitDraft = blankPit();
+  stampCurrentEvent(pitDraft);
   restorePitFieldsUI();
 }
 
@@ -2528,10 +2624,10 @@ document.getElementById('savePitBtn').addEventListener('click', async () => {
     let entry, next;
     if (editingPitId) {
       const old = pits.find(p => String(p.id) === String(editingPitId));
-      entry = { ...pitDraft, schemaVersion: 3, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 4, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, sent: false };
       next = pits.map(p => String(p.id) === String(editingPitId) ? entry : p);
     } else {
-      entry = { ...pitDraft, schemaVersion: 3, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 4, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, sent: false };
       next = [...pits, entry];
     }
     const ok = save(LS_PIT, next);
@@ -2573,6 +2669,7 @@ document.getElementById('pitEditingCancelBtn').addEventListener('click', () => {
 
 /* ══════════ DATA RENDERING ══════════ */
 function renderData() {
+  renderViewEventFilterLabel();
   renderMatchList();
   renderAverages();
   renderTeamSelect();
@@ -2580,6 +2677,7 @@ function renderData() {
   renderAllianceMatchSelect();
   renderCompatTeamSelect();
   renderPicker();
+  renderBackupStatus();
   updateUnsentCount();
 }
 
@@ -3031,7 +3129,7 @@ function toCsv(rows, headers) {
 document.getElementById('exportMatchCsv').addEventListener('click', () => {
   if (!matches.length) return showToast('No match data to export', true);
   const headers = [
-    'matchType','matchNumber','teamNumber','alliance','scouter',
+    'matchType','matchNumber','eventCode','teamNumber','alliance','scouter',
     'leave','autoPark','teleopPark',
     'startTile','startX','startY',
     'autoHiveMade','teleopHiveMade','teleopFlowerMade','ownGarden',
@@ -3059,7 +3157,7 @@ document.getElementById('exportMatchCsv').addEventListener('click', () => {
 document.getElementById('exportAllianceCsv').addEventListener('click', () => {
   if (!matches.length) return showToast('No match data to export', true);
   const headers = [
-    'matchType','matchNumber','alliance','teamsScoutedCount','teamNumbers',
+    'matchType','matchNumber','eventCode','alliance','teamsScoutedCount','teamNumbers',
     'autoTips','teleopTips','autoTipPts','teleopTipPts','disagree',
   ];
   const seen = new Set();
@@ -3071,7 +3169,7 @@ document.getElementById('exportAllianceCsv').addEventListener('click', () => {
     const recon = reconcileAlliance(matches, m);
     const distinctTeams = distinctTeamEntries(allianceEntriesFor(matches, m)).map(e => normTeam(e.teamNumber));
     const row = {
-      matchType: m.matchType || 'Qualification', matchNumber: m.matchNumber, alliance: m.alliance,
+      matchType: m.matchType || 'Qualification', matchNumber: m.matchNumber, eventCode: m.eventCode || '', alliance: m.alliance,
       teamsScoutedCount: distinctTeams.length, teamNumbers: distinctTeams.join('; '),
       autoTips: recon.autoTips.value, teleopTips: recon.teleopTips.value,
       autoTipPts: (recon.autoTips.value * 20).toFixed(1), teleopTipPts: (recon.teleopTips.value * 20).toFixed(1),
@@ -3094,18 +3192,23 @@ document.getElementById('exportPitCsv').addEventListener('click', () => {
     'routine2_name','routine2_start','routine2_description','routine2_claimedPoints','routine2_reliability',
     'routine3_name','routine3_start','routine3_description','routine3_claimedPoints','routine3_reliability',
     'routine4_name','routine4_start','routine4_description','routine4_claimedPoints','routine4_reliability',
-    'preferredSide','driverPractice','notes','entryCount',
+    'preferredSide','driverPractice','notes','entryCount','eventCodes',
   ];
   const normTeams = [...new Set(pits.map(p => normTeam(p.teamNumber)))];
   const rows = normTeams.map(norm => {
     const merged = mergePitEntriesForTeam(norm);
+    // Pit data is merged by team across however many events it was
+    // collected at (a robot's capabilities don't usually change between
+    // events the way match performance does) — eventCodes lists every
+    // distinct event that contributed, not a single column like matches get.
+    const eventCodes = [...new Set((merged.entries || []).map(e => e.eventCode || 'Unassigned'))].join('; ');
     const row = {
       teamNumber: norm, teamName: merged.teamName, drivetrain: merged.drivetrain,
       canHive: merged.canHive, canFlower: merged.canFlower, canGarden: merged.canGarden, canParkLZ: merged.canParkLZ,
       intake: (merged.intake || []).join('; '),
       preferredSide: merged.preferredSide, driverPractice: merged.driverPractice,
       notes: (merged.notesList || []).map(n => `[${n.scouter || '?'}] ${n.notes}`).join(' | '),
-      entryCount: merged.entryCount,
+      entryCount: merged.entryCount, eventCodes,
     };
     for (let i = 0; i < 4; i++) {
       const r = (merged.routines || [])[i] || {};
@@ -3123,25 +3226,67 @@ document.getElementById('exportPitCsv').addEventListener('click', () => {
 
 // Full backup — embeds every referenced image inline (keyed by id) so the
 // JSON file is self-contained and restorable on another device.
+// Shared by the Export page's existing backup button and the Data page's
+// "Back up now" button — everything needed to make another device a
+// complete copy of this one: matches, pits, their photos, the schedule,
+// and event data (official rank/RP/OPR, team list, which event is current).
+async function buildFullBackup() {
+  const images = {};
+  for (const m of matches) {
+    if (m.autoPathId) {
+      const u = imgCache.get(m.autoPathId) || await idbGetImage(m.autoPathId);
+      if (u) images[m.autoPathId] = u;
+    }
+  }
+  for (const p of pits) {
+    for (const id of (p.photoIds || [])) {
+      const u = imgCache.get(id) || await idbGetImage(id);
+      if (u) images[id] = u;
+    }
+  }
+  return { matches, pits, images, schedule, eventData, exportedAt: new Date().toISOString() };
+}
 document.getElementById('exportJson').addEventListener('click', async () => {
   try {
-    const images = {};
-    for (const m of matches) {
-      if (m.autoPathId) {
-        const u = imgCache.get(m.autoPathId) || await idbGetImage(m.autoPathId);
-        if (u) images[m.autoPathId] = u;
-      }
-    }
-    for (const p of pits) {
-      for (const id of (p.photoIds || [])) {
-        const u = imgCache.get(id) || await idbGetImage(id);
-        if (u) images[id] = u;
-      }
-    }
-    downloadFile(`biobuzz2026_backup_${Date.now()}.json`, JSON.stringify({ matches, pits, images, exportedAt: new Date().toISOString() }, null, 2), 'application/json');
+    const backup = await buildFullBackup();
+    downloadFile(`biobuzz2026_backup_${Date.now()}.json`, JSON.stringify(backup, null, 2), 'application/json');
     showToast('Backup downloaded');
   } catch (err) {
     console.error('Backup export failed', err);
+    showToast('Backup failed', true);
+  }
+});
+
+// Lead backup (top of Data page): prefers the share sheet (straight to
+// Drive/Files/email on a phone) and falls back to a plain download when
+// navigator.share with files isn't supported. Only counts as "backed up"
+// (updates lastBackupAt / clears the reminder banner) if the file actually
+// went somewhere — a cancelled share sheet throws AbortError and is a no-op.
+document.getElementById('backupNowBtn').addEventListener('click', async () => {
+  try {
+    const backup = await buildFullBackup();
+    const json = JSON.stringify(backup, null, 2);
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `biobuzz_LEAD_${eventData.eventCode || 'NoEvent'}_${dateStr}.json`;
+    let shared = false;
+    if (navigator.share && navigator.canShare) {
+      try {
+        const file = new File([json], filename, { type: 'application/json' });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: filename });
+          shared = true;
+        }
+      } catch (err) {
+        if (err && err.name === 'AbortError') return; // user cancelled — don't fall back, don't mark backed up
+      }
+    }
+    if (!shared) downloadFile(filename, json, 'application/json');
+    lastBackupAt = new Date().toISOString();
+    try { localStorage.setItem(LS_LAST_BACKUP_AT, lastBackupAt); } catch(e) {}
+    renderBackupStatus();
+    showToast(shared ? 'Backup shared' : 'Backup downloaded');
+  } catch (err) {
+    console.error('Lead backup failed', err);
     showToast('Backup failed', true);
   }
 });
@@ -3194,6 +3339,18 @@ async function mergeImportedData(data) {
     pits = r.merged;
     newP = r.added; updP = r.updated; dupP = r.skipped;
   }
+  // schedule/eventData aren't per-entry lists, so there's nothing to merge
+  // item-by-item — a full-backup file replaces them wholesale, same as
+  // Setup QR already does. This is what makes restoring one on a fresh
+  // device produce a complete lead device rather than just match/pit history.
+  if (Array.isArray(data.schedule)) {
+    schedule = data.schedule;
+    try { localStorage.setItem(LS_SCHEDULE, JSON.stringify(schedule)); } catch(e) {}
+  }
+  if (data.eventData && typeof data.eventData === 'object') {
+    eventData = { ...blankEventData(), ...data.eventData };
+    saveEventData();
+  }
 
   return { newM, updM, dupM, newP, updP, dupP };
 }
@@ -3212,6 +3369,9 @@ document.getElementById('importJsonInput').addEventListener('change', async (e) 
     if (!okM || !okP) { showToast('Import partially failed — see banner above', true); renderData(); return; }
     clearSaveError();
     showToast(`Imported: ${newM + newP} new, ${updM + updP} updated, ${dupM + dupP} already up to date`);
+    renderSchedulePreview();
+    renderPitTeamSuggestions();
+    renderEventDataUI();
     renderData();
   } catch (err) {
     console.error('Import failed', err);
@@ -3782,7 +3942,11 @@ function restoreStartPositionUI() {
 /* ══════════ ALLIANCE VIEW ══════════ */
 function renderAllianceMatchSelect() {
   const sel = document.getElementById('allianceMatchSelect');
-  const keys = [...new Set(matches.map(m => matchKeyOf(m)))];
+  // Same event-scoping as rankableMatches(), applied directly since the
+  // Alliance view looks up a single selected match by key rather than
+  // going through that pool.
+  const pool = viewEventFilter === 'all' ? matches : matches.filter(m => (m.eventCode || '') === (eventData.eventCode || ''));
+  const keys = [...new Set(pool.map(m => matchKeyOf(m)))];
   const typeOrder = { Practice: 0, Qualification: 1, Playoff: 2 };
   keys.sort((a, b) => {
     const [at, an] = a.split('|'); const [bt, bn] = b.split('|');
@@ -3791,8 +3955,11 @@ function renderAllianceMatchSelect() {
   });
   const current = sel.value;
   sel.innerHTML = '<option value="">Select a match...</option>' + keys.map(k => {
-    const [t, n] = k.split('|');
-    return `<option value="${esc(k)}">${esc(t)} ${esc(n)}</option>`;
+    const [t, n, ev] = k.split('|');
+    // Only show the event in the label when "All events" could make two
+    // same-numbered matches from different events ambiguous otherwise.
+    const evSuffix = viewEventFilter === 'all' ? ` — ${ev || 'Unassigned'}` : '';
+    return `<option value="${esc(k)}">${esc(t)} ${esc(n)}${esc(evSuffix)}</option>`;
   }).join('');
   if (keys.includes(current)) sel.value = current;
   sel.onchange = renderAllianceDetail;
@@ -4152,6 +4319,16 @@ let schedule = (() => { try { return JSON.parse(localStorage.getItem(LS_SCHEDULE
 function blankEventData() { return { eventName: '', eventCode: '', season: null, teams: [], teamStats: {}, lastUpdated: null, lastError: null }; }
 let eventData = (() => { try { return { ...blankEventData(), ...JSON.parse(localStorage.getItem(LS_EVENTDATA)) }; } catch(e) { return blankEventData(); } })();
 function saveEventData() { try { localStorage.setItem(LS_EVENTDATA, JSON.stringify(eventData)); } catch(e) {} }
+// Stamps a fresh draft/pitDraft with whichever event this device currently
+// has selected ('' = Unassigned, same bucket legacy pre-tagging entries
+// migrate into). Only called when creating a brand-new draft — editing an
+// existing entry spreads that entry's OWN eventCode over blankDraft's
+// default afterward, which correctly preserves the entry's original event
+// assignment instead of silently moving it to whatever event is current now.
+function stampCurrentEvent(obj) {
+  obj.eventCode = eventData.eventCode || '';
+  obj.season = eventData.season || null;
+}
 // Team list for Setup QR / pit suggestions: prefer FTCScout's fetched
 // roster when present, otherwise derive it from whichever team numbers
 // already appear in the imported schedule.
@@ -4510,7 +4687,7 @@ async function openQrForEntries(matchEntries, pitEntries) {
 async function encodeSetupForQr() {
   const payload = {
     k: 'setup',
-    ev: { name: eventData.eventName || '', code: eventData.eventCode || '' },
+    ev: { name: eventData.eventName || '', code: eventData.eventCode || '', season: eventData.season || null },
     tm: getEventTeamList(),
     sc: schedule.map(r => ({ t: r.type, m: r.match, r1: r.red1, r2: r.red2, b1: r.blue1, b2: r.blue2 })),
   };
@@ -4635,10 +4812,15 @@ async function handleImportPart(sessionId, partNum, total, dataChunk) {
 function applySetupPayload(payload) {
   eventData.eventName = (payload.ev && payload.ev.name) || '';
   eventData.eventCode = (payload.ev && payload.ev.code) || '';
+  eventData.season = (payload.ev && payload.ev.season) || null;
   eventData.teams = Array.isArray(payload.tm) ? payload.tm.map(t => ({ number: t.n, name: t.nm || '' })) : [];
   saveEventData();
   schedule = Array.isArray(payload.sc) ? payload.sc.map(r => ({ type: r.t, match: r.m, red1: r.r1, red2: r.r2, blue1: r.b1, blue2: r.b2 })) : schedule;
   try { localStorage.setItem(LS_SCHEDULE, JSON.stringify(schedule)); } catch(e) {}
+  // A setup import means the device is "at" this event now — move any
+  // in-progress (not yet saved) draft over too, same as a fresh draft would get.
+  stampCurrentEvent(draft);
+  stampCurrentEvent(pitDraft);
   renderSchedulePreview();
   renderPitTeamSuggestions();
   showWhoAreYouScreen();
@@ -5287,6 +5469,10 @@ async function runSelfTests() {
     eventData: JSON.parse(JSON.stringify(eventData)),
     lsEventData: (() => { try { return localStorage.getItem(LS_EVENTDATA); } catch(e) { return null; } })(),
     whoAreYouDisplay: document.getElementById('whoAreYouOverlay').style.display,
+    viewEventFilter,
+    lsViewEventFilter: (() => { try { return localStorage.getItem(LS_VIEW_EVENT_FILTER); } catch(e) { return null; } })(),
+    lastBackupAt,
+    lsLastBackupAt: (() => { try { return localStorage.getItem(LS_LAST_BACKUP_AT); } catch(e) { return null; } })(),
   };
 
   try {
@@ -6365,6 +6551,96 @@ async function runSelfTests() {
       document.getElementById('whoAreYouOverlay').style.display = 'none';
     } catch (err) { record('Setup QR round trip via #import= parts: schedule/teams import, Who-Are-You shown, re-import replaces schedule without touching saved entries', false, err.message); }
 
+    // Event tagging: matchKeyOf includes eventCode so "Qual 501" at two
+    // different events never collides — checked at every layer this is
+    // supposed to protect: raw key identity, duplicate-⚠ detection,
+    // alliance/partner lookup (the QR-merge scenario — two events' same-
+    // numbered match both landing in `matches` must never mix teams across
+    // events), and the current-vs-all-events data view filter.
+    try {
+      const ts = new Date().toISOString();
+      const base = { matchType: 'Qualification', matchNumber: '501', alliance: 'red', season: 2026, schemaVersion: 7, scouter: 'T', leave: false, autoPark: false, teleopHiveMade: 0, teleopFlowerMade: 0, ownGarden: 0, teleopPark: false, autoTips: 0, teleopTips: 0, card: '', defense: false, brokeDown: false, ratingDriver: '', ratingDefense: '', notes: '', updatedAt: ts, ts, sent: false };
+      const mEvtA = { ...base, id: 'ct_evA', teamNumber: '9901', eventCode: 'EVTA', autoHiveMade: 2 };
+      const mEvtB = { ...base, id: 'ct_evB', teamNumber: '9902', eventCode: 'EVTB', autoHiveMade: 8 };
+      const keysDistinct = matchKeyOf(mEvtA) !== matchKeyOf(mEvtB);
+
+      const savedMatches = matches, savedEventCode = eventData.eventCode, savedFilter = viewEventFilter;
+      matches = [...matches, mEvtA, mEvtB];
+
+      // Same match number + team + event IS a duplicate; same number, different event is not.
+      matches = [...matches, { ...mEvtA, id: 'ct_evA_dup' }];
+      const dupKeys = duplicateKeySet();
+      const sameEventDupDetected = dupKeys.has(matchKeyOf(mEvtA) + '|' + normTeam(mEvtA.teamNumber));
+      matches = matches.filter(m => m.id !== 'ct_evA_dup');
+
+      // QR-merge scenario: both events' "Qual 501" entries now sit together
+      // in `matches` (as if just received via QR) — alliance lookup for the
+      // Event-A entry must see ONLY Event A's red alliance.
+      const allianceForA = allianceEntriesFor(matches, mEvtA);
+      const qrMergeKeptApart = allianceForA.length === 1 && allianceForA[0].id === 'ct_evA';
+
+      eventData.eventCode = 'EVTA';
+      viewEventFilter = 'current';
+      const avgCurrentA = teamAverages().find(r => r.team === '9901');
+      const currentScoped = !!avgCurrentA && avgCurrentA.matches === 1;
+      const otherEventHidden = !teamAverages().find(r => r.team === '9902');
+
+      viewEventFilter = 'all';
+      const avgAllA = teamAverages().find(r => r.team === '9901');
+      const avgAllB = teamAverages().find(r => r.team === '9902');
+      const allEventsCombined = !!avgAllA && avgAllA.matches === 1 && !!avgAllB && avgAllB.matches === 1;
+
+      eventData.eventCode = savedEventCode;
+      viewEventFilter = savedFilter;
+      matches = savedMatches;
+
+      const pass = keysDistinct && sameEventDupDetected && qrMergeKeptApart && currentScoped && otherEventHidden && allEventsCombined;
+      record('Event tagging: same match number at two events stays separate (matchKeyOf, duplicate ⚠, QR-merge alliance lookup, current-vs-all-events filter)', pass,
+        JSON.stringify({ keysDistinct, sameEventDupDetected, qrMergeKeptApart, currentScoped, otherEventHidden, allEventsCombined }));
+    } catch (err) { record('Event tagging: same match number at two events stays separate (matchKeyOf, duplicate ⚠, QR-merge alliance lookup, current-vs-all-events filter)', false, err.message); }
+
+    // Lead backup: the full backup (matches, pits, schedule, event data)
+    // restored onto a wiped-clean "fresh device" must reproduce identical
+    // data-view numbers, not just raw records.
+    try {
+      const ts = new Date().toISOString();
+      const srcMatch = { id: 'ct_bkA', matchType: 'Qualification', matchNumber: '601', teamNumber: '9911', alliance: 'blue', eventCode: 'BKEV', season: 2026, schemaVersion: 7, scouter: 'T', leave: true, autoPark: true, autoHiveMade: 3, teleopHiveMade: 1, teleopFlowerMade: 2, ownGarden: 0, teleopPark: true, autoTips: 1, teleopTips: 2, card: '', defense: false, brokeDown: false, ratingDriver: '4', ratingDefense: '3', notes: 'bk test', updatedAt: ts, ts, sent: false };
+      const srcPit = { id: 'ct_bkpit', teamNumber: '9911', teamName: 'Backup Co', drivetrain: 'Mecanum', scouter: 'T', canHive: true, canFlower: false, canGarden: true, canParkLZ: false, intake: [], routines: [], preferredSide: '', driverPractice: '', notes: '', photoIds: [], sent: false, eventCode: 'BKEV', season: 2026, schemaVersion: 4, updatedAt: ts, ts };
+
+      const savedMatches = matches, savedPits = pits, savedSchedule = schedule, savedEventData = JSON.parse(JSON.stringify(eventData)), savedFilter = viewEventFilter;
+      matches = [...matches, srcMatch];
+      pits = [...pits, srcPit];
+      schedule = [{ type: 'Q', match: '601', red1: '1', red2: '2', blue1: '9911', blue2: '4' }];
+      eventData = { ...blankEventData(), eventName: 'Backup Test Event', eventCode: 'BKEV', season: 2026 };
+
+      const backup = JSON.parse(JSON.stringify(await buildFullBackup()));
+      viewEventFilter = 'all'; // compare apples to apples regardless of which event the real device has "current"
+      const srcTeamAvg = teamAverages().find(r => r.team === '9911');
+
+      // Simulate a fresh device: wipe everything, then restore from the backup.
+      matches = []; pits = []; schedule = []; eventData = blankEventData();
+      await mergeImportedData(backup);
+      const restoredTeamAvg = teamAverages().find(r => r.team === '9911');
+
+      const restoredMatch = matches.find(m => m.id === 'ct_bkA');
+      const matchRestored = !!restoredMatch && restoredMatch.eventCode === 'BKEV';
+      const restoredPit = pits.find(p => p.id === 'ct_bkpit');
+      const pitRestored = !!restoredPit;
+      const scheduleRestored = schedule.length === 1 && schedule[0].match === '601';
+      const eventDataRestored = eventData.eventCode === 'BKEV' && eventData.eventName === 'Backup Test Event';
+      const dataViewsIdentical = !!srcTeamAvg && !!restoredTeamAvg &&
+        srcTeamAvg.matches === restoredTeamAvg.matches && srcTeamAvg.avgTotal === restoredTeamAvg.avgTotal &&
+        srcTeamAvg.avgAuto === restoredTeamAvg.avgAuto && srcTeamAvg.avgTeleop === restoredTeamAvg.avgTeleop &&
+        srcTeamAvg.avgEndgame === restoredTeamAvg.avgEndgame;
+
+      viewEventFilter = savedFilter;
+      matches = savedMatches; pits = savedPits; schedule = savedSchedule; eventData = savedEventData;
+
+      const pass = matchRestored && pitRestored && scheduleRestored && eventDataRestored && dataViewsIdentical;
+      record('Lead backup: full backup → fresh device → restore → identical data views (matches, pits, schedule, event data)', pass,
+        JSON.stringify({ matchRestored, pitRestored, scheduleRestored, eventDataRestored, dataViewsIdentical }));
+    } catch (err) { record('Lead backup: full backup → fresh device → restore → identical data views (matches, pits, schedule, event data)', false, err.message); }
+
   } finally {
     // Restore real state exactly as it was before any test ran.
     matches = snapshot.matches;
@@ -6415,8 +6691,14 @@ async function runSelfTests() {
     eventData = snapshot.eventData;
     try { if (snapshot.lsEventData !== null) localStorage.setItem(LS_EVENTDATA, snapshot.lsEventData); else localStorage.removeItem(LS_EVENTDATA); } catch(e) {}
     document.getElementById('whoAreYouOverlay').style.display = snapshot.whoAreYouDisplay;
+    viewEventFilter = snapshot.viewEventFilter;
+    try { if (snapshot.lsViewEventFilter !== null) localStorage.setItem(LS_VIEW_EVENT_FILTER, snapshot.lsViewEventFilter); else localStorage.removeItem(LS_VIEW_EVENT_FILTER); } catch(e) {}
+    document.getElementById('viewEventFilterSelect').value = viewEventFilter;
+    lastBackupAt = snapshot.lastBackupAt;
+    try { if (snapshot.lsLastBackupAt !== null) localStorage.setItem(LS_LAST_BACKUP_AT, snapshot.lsLastBackupAt); else localStorage.removeItem(LS_LAST_BACKUP_AT); } catch(e) {}
     renderSchedulePreview();
     renderPitTeamSuggestions();
+    renderData();
   }
 
   const passCount = results.filter(r => r.pass).length;
@@ -6431,6 +6713,12 @@ async function runSelfTests() {
   await sweepOrphanImages();
   await preloadAllImages();
   applyRoleUI();
+  // Stamps the very first draft/pitDraft with the current event. A restore
+  // right after (checkDraftRestore / restorePitDraftIfAny) replaces these
+  // objects entirely with whatever event THAT draft was already tagged
+  // with, so this only actually matters when there's nothing to restore.
+  stampCurrentEvent(draft);
+  stampCurrentEvent(pitDraft);
   renderData();
   initAutoPathCanvas();
   assertFieldSymmetry();
