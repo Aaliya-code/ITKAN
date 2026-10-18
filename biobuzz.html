@@ -505,6 +505,11 @@
         <span>Match saved.</span>
         <button class="btn btn-primary btn-sm" id="postSaveQrBtn">Show QR</button>
       </div>
+      <div class="card" id="scoutNotSetUpCard" style="display:none;text-align:center;">
+        <div class="card-title">Not set up yet</div>
+        <div class="hint" style="margin:8px 0;">Scan the lead's Setup QR to get your event, team list, and match schedule.</div>
+        <button class="btn btn-primary" id="scoutScanSetupBtn" style="font-size:18px;padding:16px;">📷 Scan Setup QR</button>
+      </div>
       <div class="card">
         <div class="card-title">Match Info</div>
         <div class="field">
@@ -935,7 +940,6 @@
       <div class="btn-row">
         <button class="btn btn-secondary" id="scanQrBtn">Scan QR</button>
       </div>
-      <div id="qrScanStatus" class="hint"></div>
     </div>
     <div class="card">
       <div class="card-title">Device Storage</div>
@@ -1028,6 +1032,9 @@
 
 <div class="review-overlay" id="meSheet" style="display:none;">
   <h2 class="section-title">Me</h2>
+  <div class="card" style="text-align:center;">
+    <button class="btn btn-primary" id="meScanSetupBtn" style="font-size:18px;padding:16px;">📷 Scan Setup QR</button>
+  </div>
   <div class="card">
     <div class="field">
       <label>Your Name</label>
@@ -1043,6 +1050,10 @@
         <button data-station="">None</button>
       </div>
     </div>
+  </div>
+  <div class="card">
+    <div class="card-title">My Saved Entries</div>
+    <div id="meSavedEntriesList"></div>
   </div>
   <div class="card">
     <div class="hint" id="meUnsentHint">0 unsent entries</div>
@@ -4343,10 +4354,51 @@ document.getElementById('pinInput').addEventListener('keydown', e => {
 document.getElementById('meBtn').addEventListener('click', () => {
   document.getElementById('meSheet').style.display = 'block';
   updateUnsentCount();
+  renderMeSavedEntries();
 });
 document.getElementById('meCloseBtn').addEventListener('click', () => {
   document.getElementById('meSheet').style.display = 'none';
 });
+// Lists every match/pit entry saved on THIS device (newest first), each
+// with an Edit button reusing the existing startEditMatch/startEditPit
+// flow — the same functions the Lead's Data > Matches "Edit" button calls,
+// which already self-navigate to the right page. No delete here (task:
+// "No delete for scouters"). performActualSave/the pit save handler both
+// unconditionally stamp sent:false, so an edited entry is automatically
+// re-sent as "updated" the next time "Send my data (QR)" runs.
+function renderMeSavedEntries() {
+  const el = document.getElementById('meSavedEntriesList');
+  if (!el) return;
+  const items = [
+    ...matches.map(m => ({ kind: 'match', id: m.id, sent: !!m.sent, label: `${matchLabelOf(m)} — #${normTeam(m.teamNumber)}`, sortTs: m.updatedAt || m.ts || '' })),
+    ...pits.map(p => ({ kind: 'pit', id: p.id, sent: !!p.sent, label: `Pit — #${normTeam(p.teamNumber)}`, sortTs: p.updatedAt || p.ts || '' })),
+  ].sort((a, b) => (b.sortTs || '').localeCompare(a.sortTs || ''));
+  if (!items.length) { el.innerHTML = '<div class="hint">No saved entries yet.</div>'; return; }
+  el.innerHTML = items.map(item => `
+    <div class="review-row">
+      <span class="k">${item.sent ? '✓' : '•'} ${esc(item.label)}</span>
+      <button class="btn btn-secondary btn-sm" data-edit-kind="${item.kind}" data-edit-id="${esc(item.id)}">Edit</button>
+    </div>
+  `).join('');
+  el.querySelectorAll('[data-edit-kind]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.editId;
+      document.getElementById('meSheet').style.display = 'none';
+      if (btn.dataset.editKind === 'match') startEditMatch(id); else startEditPit(id);
+    });
+  });
+}
+// Scouter-reachable Setup QR scan entry points (Me sheet + Scout tab's
+// "Not set up yet" card) — both just open the same scanner the Lead's
+// Export-page "Scan QR" button does. meSheet must be hidden first: it's a
+// later .review-overlay than #scannerOverlay in the DOM, so with both
+// visible meSheet would paint on top (same stacking rule as the earlier
+// meSheet/qrOverlay bug).
+document.getElementById('meScanSetupBtn').addEventListener('click', () => {
+  document.getElementById('meSheet').style.display = 'none';
+  startQrScanner();
+});
+document.getElementById('scoutScanSetupBtn').addEventListener('click', startQrScanner);
 document.getElementById('meSendQrBtn').addEventListener('click', () => {
   // meSheet sits after qrOverlay in the DOM, so at the same z-index it
   // paints on top and swallows every click on the QR overlay underneath
@@ -4613,6 +4665,8 @@ renderEventDataUI();
 function renderSchedulePreview() {
   const wrap = document.getElementById('schedulePreviewWrap');
   const table = document.getElementById('schedulePreviewTable');
+  const notSetUpCard = document.getElementById('scoutNotSetUpCard');
+  if (notSetUpCard) notSetUpCard.style.display = schedule.length ? 'none' : '';
   if (!schedule.length) { wrap.style.display = 'none'; table.innerHTML = ''; return; }
   wrap.style.display = '';
   const sorted = [...schedule].sort((a,b) => (MATCH_TYPE_ORDER[a.type]??1) - (MATCH_TYPE_ORDER[b.type]??1) || Number(a.match) - Number(b.match));
@@ -4974,20 +5028,27 @@ async function checkImportHash() {
    unavailable and we show the fallback message instead of failing silently. */
 let scannerStream = null, scannerRAF = null, lastScannedText = null;
 async function startQrScanner() {
-  const statusEl = document.getElementById('qrScanStatus');
+  // The overlay opens FIRST and carries every status message (including
+  // failures) from here on — it's reachable from three different places
+  // now (Export's Scan QR, the Me sheet, the Scout tab's "Not set up yet"
+  // card), and the old behavior of writing failures to Export-page-only
+  // #qrScanStatus left a scouter tapping from the Me sheet or Scout tab
+  // with no visible error at all.
+  const scannerStatusEl = document.getElementById('scannerStatus');
+  lastScannedText = null;
+  scannerStatusEl.textContent = 'Requesting camera access…';
+  document.getElementById('scannerOverlay').style.display = 'block';
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    statusEl.textContent = 'Camera scanning needs this page opened at localhost on the server Mac — or scan with the iPad Camera app instead.';
+    scannerStatusEl.textContent = 'Camera scanning needs this page opened at localhost on the server Mac — or scan with the iPad Camera app instead.';
     return;
   }
   try {
     scannerStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
   } catch (err) {
-    statusEl.textContent = 'Camera access denied or unavailable.';
+    scannerStatusEl.textContent = 'Camera access denied or unavailable.';
     return;
   }
-  lastScannedText = null;
-  document.getElementById('scannerStatus').textContent = 'Point the camera at a QR code…';
-  document.getElementById('scannerOverlay').style.display = 'block';
+  scannerStatusEl.textContent = 'Point the camera at a QR code…';
   const video = document.getElementById('scannerVideo');
   video.srcObject = scannerStream;
   await video.play();
@@ -6798,6 +6859,45 @@ async function runSelfTests() {
       if (activeDstepBtn) activeDstepBtn.click(); else document.querySelector('#page-data .step-nav button[data-dstep="matches"]').click();
       renderData();
     } catch (err) { record('Rankings: every event team listed in official order with "—" for unscouted stats; tapping opens By Team with that team selected and "Not scouted yet"; unscouted teams appear in the By Team dropdown', false, err.message); }
+
+    // Scouter QR-scan reachability: the Me sheet's "My Saved Entries" list
+    // (added so "edit" is reachable without Data's Lead-only nav) shows
+    // every local match/pit with a sent/unsent marker, and its Edit button
+    // reuses the real startEditMatch/startEditPit flow. Also covers the
+    // Scout tab's "Not set up yet" card, which is schedule.length-driven.
+    try {
+      const ts = new Date().toISOString();
+      const savedMatches = matches, savedPits = pits, savedEditingId = editingId, savedSchedule = schedule;
+      const testMatch = { id: 'ct_me_m1', matchType: 'Qualification', matchNumber: '42', teamNumber: '9931', alliance: 'red', schemaVersion: 7, scouter: 'T', leave: false, autoPark: false, autoHiveMade: 0, teleopHiveMade: 0, teleopFlowerMade: 0, ownGarden: 0, teleopPark: false, autoTips: 0, teleopTips: 0, card: '', defense: false, brokeDown: false, ratingDriver: '', ratingDefense: '', notes: '', eventCode: '', season: null, updatedAt: ts, ts, sent: false };
+      const testPit = { id: 'ct_me_p1', teamNumber: '9932', teamName: 'Me Sheet Co', drivetrain: '', scouter: 'T', canHive: false, canFlower: false, canGarden: false, canParkLZ: false, intake: [], routines: [], preferredSide: '', driverPractice: '', notes: '', photoIds: [], sent: true, eventCode: '', season: null, schemaVersion: 4, updatedAt: ts, ts };
+      matches = [...matches, testMatch];
+      pits = [...pits, testPit];
+      renderMeSavedEntries();
+      const listHtml = document.getElementById('meSavedEntriesList').innerHTML;
+      const matchListed = listHtml.includes('data-edit-id="ct_me_m1"') && /•[^<]*Qualification 42[^<]*#9931/.test(listHtml.replace(/\s+/g, ' '));
+      const pitListed = listHtml.includes('data-edit-id="ct_me_p1"') && /✓[^<]*Pit[^<]*#9932/.test(listHtml.replace(/\s+/g, ' '));
+
+      document.querySelector('[data-edit-kind="match"][data-edit-id="ct_me_m1"]').click();
+      const editOpenedScoutPage = document.getElementById('page-scout').classList.contains('active');
+      const editSetCorrectId = editingId === 'ct_me_m1';
+      const meSheetClosedAfterEditTap = document.getElementById('meSheet').style.display === 'none';
+      exitEditMode();
+      resetScoutForm();
+
+      schedule = [];
+      renderSchedulePreview();
+      const notSetUpVisibleWhenEmpty = document.getElementById('scoutNotSetUpCard').style.display !== 'none';
+      schedule = [{ type: 'Q', match: '1', red1: '1', red2: '2', blue1: '3', blue2: '4' }];
+      renderSchedulePreview();
+      const notSetUpHiddenWhenPresent = document.getElementById('scoutNotSetUpCard').style.display === 'none';
+
+      const pass = matchListed && pitListed && editOpenedScoutPage && editSetCorrectId && meSheetClosedAfterEditTap && notSetUpVisibleWhenEmpty && notSetUpHiddenWhenPresent;
+      record('Scouter reachability: Me sheet "My Saved Entries" lists matches/pits with sent markers and a working Edit button; Scout tab\'s "Not set up yet" card tracks schedule.length', pass,
+        JSON.stringify({ matchListed, pitListed, editOpenedScoutPage, editSetCorrectId, meSheetClosedAfterEditTap, notSetUpVisibleWhenEmpty, notSetUpHiddenWhenPresent }));
+
+      matches = savedMatches; pits = savedPits; editingId = savedEditingId; schedule = savedSchedule;
+      renderSchedulePreview();
+    } catch (err) { record('Scouter reachability: Me sheet "My Saved Entries" lists matches/pits with sent markers and a working Edit button; Scout tab\'s "Not set up yet" card tracks schedule.length', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
