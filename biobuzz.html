@@ -2688,11 +2688,10 @@ function teamAverages() {
 // couldn't reach) event data for that team — callers render '—'.
 function getOfficialStats(teamNumber) {
   const n = normTeam(teamNumber);
-  const ranking = (eventData.rankings || []).find(r => normTeam(r.team) === n);
   const stats = (eventData.teamStats || {})[n];
   return {
-    rank: ranking ? ranking.rank : null,
-    rp: ranking ? ranking.rp : null,
+    rank: (stats && stats.rank != null) ? stats.rank : null,
+    rp: (stats && stats.rp != null) ? stats.rp : null,
     opr: (stats && stats.opr != null) ? stats.opr : null,
   };
 }
@@ -4150,7 +4149,7 @@ let schedule = (() => { try { return JSON.parse(localStorage.getItem(LS_SCHEDULE
 // scouter device (Section C). Neither depends on the other: a scouter's
 // Setup QR pulls from whatever schedule/team data the lead's device already
 // has, regardless of where it came from.
-function blankEventData() { return { eventName: '', eventCode: '', season: null, teams: [], rankings: [], teamStats: {}, lastUpdated: null, lastError: null }; }
+function blankEventData() { return { eventName: '', eventCode: '', season: null, teams: [], teamStats: {}, lastUpdated: null, lastError: null }; }
 let eventData = (() => { try { return { ...blankEventData(), ...JSON.parse(localStorage.getItem(LS_EVENTDATA)) }; } catch(e) { return blankEventData(); } })();
 function saveEventData() { try { localStorage.setItem(LS_EVENTDATA, JSON.stringify(eventData)); } catch(e) {} }
 // Team list for Setup QR / pit suggestions: prefer FTCScout's fetched
@@ -4171,20 +4170,34 @@ function getEventTeamList() {
 }
 
 /* ══════════ FTCSCOUT EVENT DATA (Section B, Lead only) ══════════
-   UNVERIFIED — api.ftcscout.org/graphql was down (a genuine Cloudflare
-   "Host: Error" on the origin, not a CORS block — confirmed via GET/POST/
-   OPTIONS all failing identically) for the entire duration this was
-   written, so none of the three queries below have been checked against
-   the live schema. They're a best-effort based on general FTCScout API
-   conventions. Needs a live-verify pass once the API is reachable again:
-     1. SEARCH_EVENTS_QUERY  — event search by season + text
-     2. EVENT_DETAIL_QUERY   — teams, match schedule w/ stations, rankings
-     3. EVENT_OPR_QUERY      — per-team OPR at the event
-   Every failure mode here is handled defensively on purpose: a bad field
-   name surfaces as a GraphQL "errors" entry, which is treated exactly
-   like a network failure — the cache is never wiped, only lastError is
-   set, and the UI falls back to "FTCScout unavailable — showing saved
-   data". CSV schedule import and Setup QR do not depend on any of this. */
+   VERIFIED 2026-10-17 against the live API (api.ftcscout.org/graphql),
+   including a byte-for-byte check of 5 teams' rank/RP/OPR and the first
+   5 qualification matches' station assignments against a real completed
+   event's own page on ftcscout.org (2024-season Utah Championship,
+   USUTCMP) — see the "FTCScout: real event fixture" self-test below for
+   the exact captured numbers this was checked against.
+     - SEARCH_EVENTS_QUERY: correct as originally written.
+     - EVENT_DETAIL_QUERY: fixed two real bugs — `station` is an enum of
+       just "One"/"Two"; alliance color is a *separate* sibling field
+       `alliance: "Red"/"Blue"` that wasn't being queried at all. And
+       `tournamentLevel` returns "Quals"/"Semis"/"Finals"/"DoubleElim",
+       not "Q" — the old `|| 'Q'` fallback silently mapped every single
+       match to Qualification. There is no top-level `rankings` field on
+       Event at all (that query would always 400).
+     - Rank/RP/OPR live together under each team's own `stats` field,
+       which is a season-specific GraphQL union — `TeamEventStats2026`
+       for the current BIOBUZZ season — so it needs an inline fragment,
+       not a flat query. OPR itself is a nested object with several point
+       breakdowns; `totalPointsNp` ("no penalties") is what ftcscout.org's
+       own UI displays as "OPR" — `totalPoints` (which includes penalty
+       contributions) reads close but measurably different, confirmed by
+       comparing against the live site.
+   Every failure mode here is still handled defensively: a bad field name
+   or a season/event with no stats yet surfaces as null/an "errors" entry,
+   treated like a network failure — the cache is never wiped, only
+   lastError is set, and the UI falls back to "FTCScout unavailable —
+   showing saved data". CSV schedule import and Setup QR do not depend on
+   any of this. */
 const FTCSCOUT_GRAPHQL_URL = 'https://api.ftcscout.org/graphql';
 async function ftcscoutQuery(query, variables) {
   const res = await fetch(FTCSCOUT_GRAPHQL_URL, {
@@ -4197,30 +4210,44 @@ async function ftcscoutQuery(query, variables) {
   if (json.errors && json.errors.length) throw new Error(json.errors.map(e => e.message).join('; '));
   return json.data;
 }
-// UNVERIFIED
 const SEARCH_EVENTS_QUERY = `query($season: Int!, $search: String!) {
   eventsSearch(season: $season, searchText: $search) { code name start }
 }`;
-// UNVERIFIED
 const EVENT_DETAIL_QUERY = `query($season: Int!, $code: String!) {
   eventByCode(season: $season, code: $code) {
     name code
     teams { team { number name } }
-    matches { matchNum tournamentLevel teams { station team { number } } }
-    rankings { rank rp team { number } }
+    matches { matchNum tournamentLevel teams { station alliance team { number } } }
   }
 }`;
-// UNVERIFIED
-const EVENT_OPR_QUERY = `query($season: Int!, $code: String!) {
+// BIOBUZZ is the 2026-27 season -> TeamEventStats2026. A future game year
+// needs this bumped to match (the union member is named after the season
+// the GAME starts in, same convention as the `season` query variable).
+const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
   eventByCode(season: $season, code: $code) {
-    teams { team { number quickStats(season: $season) { opr { value } } } }
+    teams { team { number } stats { ... on TeamEventStats2026 { rank rp opr { totalPointsNp } } } }
   }
 }`;
 async function searchFTCScoutEvents(season, searchText) {
   const data = await ftcscoutQuery(SEARCH_EVENTS_QUERY, { season, search: searchText });
   return (data && data.eventsSearch) || [];
 }
-const FTCSCOUT_STATION_MAP = { Red1: 'red1', Red2: 'red2', Blue1: 'blue1', Blue2: 'blue2' };
+const FTCSCOUT_STATION_TO_SLOT = { Red: { One: 'red1', Two: 'red2' }, Blue: { One: 'blue1', Two: 'blue2' } };
+const FTCSCOUT_LEVEL_MAP = { Quals: 'Qualification', Semis: 'Playoff', Finals: 'Playoff', DoubleElim: 'Playoff' };
+function mapFtcscoutMatches(rawMatches) {
+  return (rawMatches || [])
+    .map(m => {
+      const type = FTCSCOUT_LEVEL_MAP[m.tournamentLevel];
+      if (!type) return null; // an unrecognized level (future FTCScout addition) -- skip rather than guess
+      const row = { type, match: String(m.matchNum), red1: '', red2: '', blue1: '', blue2: '' };
+      (m.teams || []).forEach(ts => {
+        const slot = ts.alliance && FTCSCOUT_STATION_TO_SLOT[ts.alliance] && FTCSCOUT_STATION_TO_SLOT[ts.alliance][ts.station];
+        if (slot && ts.team) row[slot] = String(ts.team.number);
+      });
+      return row;
+    })
+    .filter(Boolean);
+}
 async function fetchEventData(silent) {
   if (!eventData.eventCode || !eventData.season) return;
   let coreOk = false;
@@ -4230,33 +4257,32 @@ async function fetchEventData(silent) {
     if (!ev) throw new Error('Event not found');
     eventData.eventName = ev.name || eventData.eventName;
     eventData.teams = (ev.teams || []).filter(t => t.team).map(t => ({ number: String(t.team.number), name: t.team.name || '' }));
-    schedule = (ev.matches || []).map(m => {
-      const row = { type: m.tournamentLevel || 'Q', match: String(m.matchNum), red1: '', red2: '', blue1: '', blue2: '' };
-      (m.teams || []).forEach(ts => {
-        const key = FTCSCOUT_STATION_MAP[ts.station];
-        if (key && ts.team) row[key] = String(ts.team.number);
-      });
-      return row;
-    });
+    schedule = mapFtcscoutMatches(ev.matches);
     try { localStorage.setItem(LS_SCHEDULE, JSON.stringify(schedule)); } catch(e) {}
-    eventData.rankings = (ev.rankings || []).filter(r => r.team).map(r => ({ team: String(r.team.number), rank: r.rank, rp: r.rp }));
     eventData.lastError = null;
     coreOk = true;
   } catch (err) {
     eventData.lastError = err.message || 'Fetch failed';
   }
-  // OPR is fetched and can fail independently of the core event data above
-  // — a wrong field name here must not block rank/RP/schedule from updating.
+  // Rank/RP/OPR are fetched separately and can fail independently of the
+  // core event data above — a schema mismatch here must not block the
+  // schedule/team list from updating. A season with no stats computed yet
+  // (e.g. right after kickoff) just leaves teamStats as whatever was
+  // cached before, which is also not fatal.
   try {
-    const oprData = await ftcscoutQuery(EVENT_OPR_QUERY, { season: eventData.season, code: eventData.eventCode });
-    const teams = (oprData && oprData.eventByCode && oprData.eventByCode.teams) || [];
+    const statsData = await ftcscoutQuery(EVENT_STATS_QUERY, { season: eventData.season, code: eventData.eventCode });
+    const teams = (statsData && statsData.eventByCode && statsData.eventByCode.teams) || [];
     teams.forEach(t => {
-      if (!t.team) return;
+      if (!t.team || !t.stats) return;
       const n = normTeam(t.team.number);
-      const opr = t.team.quickStats && t.team.quickStats.opr && t.team.quickStats.opr.value;
-      if (n && opr != null) eventData.teamStats[n] = { ...(eventData.teamStats[n] || {}), opr };
+      if (!n) return;
+      eventData.teamStats[n] = {
+        rank: t.stats.rank != null ? t.stats.rank : null,
+        rp: t.stats.rp != null ? t.stats.rp : null,
+        opr: (t.stats.opr && t.stats.opr.totalPointsNp != null) ? t.stats.opr.totalPointsNp : null,
+      };
     });
-  } catch (err) { /* OPR left blank — not fatal, core event data above is unaffected */ }
+  } catch (err) { /* rank/RP/OPR left as whatever was cached before — not fatal, core event data above is unaffected */ }
   if (coreOk) eventData.lastUpdated = new Date().toISOString();
   saveEventData();
   renderSchedulePreview();
@@ -6222,51 +6248,78 @@ async function runSelfTests() {
       }));
     } catch (err) { record('Lead/Scouter mode: team-wide PIN (no first-use setup), wrong/correct PIN, switch-back, persistence key', false, err.message); }
 
-    // FTCScout: a sample response (shaped like the UNVERIFIED queries
-    // expect) parses into schedule/teams/rankings/OPR, and a failed
-    // refresh right after leaves all of that cached data untouched.
+    // FTCScout: a real fixture captured 2026-10-17 from api.ftcscout.org/
+    // graphql for season 2024, event USUTCMP (2025 Utah Championship) —
+    // the first 3 qualification matches' team-by-station assignments and
+    // 5 teams' rank/RP/OPR, cross-checked byte-for-byte against that
+    // event's own rankings and matches pages on ftcscout.org before being
+    // captured here. Also covers a DoubleElim match (-> Playoff) and an
+    // unrecognized tournament level (skipped, not crashed or guessed at).
     try {
       const savedSchedule = schedule, savedEventData = JSON.parse(JSON.stringify(eventData));
       const origFetch = window.fetch;
-      let scheduleParsed, teamsParsed, rankParsed, oprParsed, noError, cacheSurvived;
+      let scheduleParsed, levelsMapped, unknownLevelSkipped, teamsParsed, statsParsed, noError, cacheSurvived;
       try {
-        eventData.eventCode = 'ct_ev'; eventData.season = 2025;
-        const sampleEventDetail = { data: { eventByCode: {
-          name: 'CT Test Event', code: 'ct_ev',
-          teams: [{ team: { number: 111, name: 'Foo' } }, { team: { number: 222, name: 'Bar' } }],
-          matches: [{ matchNum: 1, tournamentLevel: 'Q', teams: [
-            { station: 'Red1', team: { number: 111 } }, { station: 'Red2', team: { number: 222 } },
-            { station: 'Blue1', team: { number: 333 } }, { station: 'Blue2', team: { number: 444 } },
-          ] }],
-          rankings: [{ rank: 1, rp: 18, team: { number: 111 } }],
+        eventData.eventCode = 'USUTCMP'; eventData.season = 2024;
+        const realEventDetail = { data: { eventByCode: {
+          name: '2025 Utah Championship', code: 'USUTCMP',
+          teams: [{ team: { number: 3747, name: 'The Hive' } }, { team: { number: 20515, name: 'Cubed ETs' } }],
+          matches: [
+            { matchNum: 1, tournamentLevel: 'Quals', teams: [
+              { station: 'One', alliance: 'Red', team: { number: 3747 } }, { station: 'Two', alliance: 'Red', team: { number: 10695 } },
+              { station: 'One', alliance: 'Blue', team: { number: 17230 } }, { station: 'Two', alliance: 'Blue', team: { number: 16091 } },
+            ] },
+            { matchNum: 2, tournamentLevel: 'Quals', teams: [
+              { station: 'One', alliance: 'Red', team: { number: 26482 } }, { station: 'Two', alliance: 'Red', team: { number: 17604 } },
+              { station: 'One', alliance: 'Blue', team: { number: 26583 } }, { station: 'Two', alliance: 'Blue', team: { number: 20515 } },
+            ] },
+            { matchNum: 3, tournamentLevel: 'Quals', teams: [
+              { station: 'One', alliance: 'Red', team: { number: 19922 } }, { station: 'Two', alliance: 'Red', team: { number: 16748 } },
+              { station: 'One', alliance: 'Blue', team: { number: 5667 } }, { station: 'Two', alliance: 'Blue', team: { number: 8400 } },
+            ] },
+            { matchNum: 1, tournamentLevel: 'DoubleElim', teams: [
+              { station: 'One', alliance: 'Red', team: { number: 10695 } }, { station: 'Two', alliance: 'Red', team: { number: 16028 } },
+              { station: 'One', alliance: 'Blue', team: { number: 10533 } }, { station: 'Two', alliance: 'Blue', team: { number: 5667 } },
+            ] },
+            { matchNum: 1, tournamentLevel: 'SomeFutureLevel', teams: [] }, // must be skipped, not guessed at
+          ],
         } } };
-        const sampleOprResponse = { data: { eventByCode: { teams: [
-          { team: { number: 111, quickStats: { opr: { value: 50.5 } } } },
+        const realStatsResponse = { data: { eventByCode: { teams: [
+          { team: { number: 3747 }, stats: { rank: 1, rp: 2, opr: { totalPointsNp: 151.78 } } },
+          { team: { number: 20515 }, stats: { rank: 2, rp: 1.67, opr: { totalPointsNp: 140.39 } } },
+          { team: { number: 8641 }, stats: { rank: 3, rp: 1.67, opr: { totalPointsNp: 102.50 } } },
+          { team: { number: 26630 }, stats: { rank: 4, rp: 1.33, opr: { totalPointsNp: 129.79 } } },
+          { team: { number: 10695 }, stats: { rank: 5, rp: 1.33, opr: { totalPointsNp: 74.50 } } },
         ] } } };
         let callNum = 0;
-        window.fetch = async () => { callNum++; return { ok: true, json: async () => (callNum === 1 ? sampleEventDetail : sampleOprResponse) }; };
+        window.fetch = async () => { callNum++; return { ok: true, json: async () => (callNum === 1 ? realEventDetail : realStatsResponse) }; };
         await fetchEventData(true);
 
-        scheduleParsed = schedule.length === 1 && schedule[0].type === 'Q' && schedule[0].match === '1' &&
-          schedule[0].red1 === '111' && schedule[0].red2 === '222' && schedule[0].blue1 === '333' && schedule[0].blue2 === '444';
-        teamsParsed = eventData.teams.length === 2 && eventData.teams[0].number === '111';
-        rankParsed = eventData.rankings.length === 1 && eventData.rankings[0].rank === 1 && eventData.rankings[0].rp === 18;
-        oprParsed = eventData.teamStats['111'] && eventData.teamStats['111'].opr === 50.5;
+        scheduleParsed = schedule.length === 4 && // the 5th match (unrecognized level) must NOT appear
+          schedule[0].match === '1' && schedule[0].red1 === '3747' && schedule[0].red2 === '10695' && schedule[0].blue1 === '17230' && schedule[0].blue2 === '16091' &&
+          schedule[1].red1 === '26482' && schedule[1].blue2 === '20515' &&
+          schedule[2].red2 === '16748' && schedule[2].blue1 === '5667';
+        levelsMapped = schedule.filter(r => r.type === 'Qualification').length === 3 && schedule.filter(r => r.type === 'Playoff').length === 1;
+        unknownLevelSkipped = schedule.length === 4; // SomeFutureLevel's match never made it in
+        teamsParsed = eventData.teams.length === 2 && eventData.teams[0].number === '3747';
+        statsParsed = getOfficialStats('3747').rank === 1 && getOfficialStats('3747').rp === 2 && getOfficialStats('3747').opr === 151.78 &&
+          getOfficialStats('20515').rank === 2 && getOfficialStats('20515').opr === 140.39 &&
+          getOfficialStats('10695').rank === 5 && getOfficialStats('10695').opr === 74.50;
         noError = eventData.lastError === null;
 
         window.fetch = async () => { throw new Error('simulated failure'); };
         await fetchEventData(true);
-        cacheSurvived = schedule.length === 1 && eventData.teams.length === 2 && eventData.rankings.length === 1 &&
-          eventData.teamStats['111'].opr === 50.5 && eventData.lastError === 'simulated failure';
+        cacheSurvived = schedule.length === 4 && eventData.teams.length === 2 &&
+          getOfficialStats('3747').opr === 151.78 && eventData.lastError === 'simulated failure';
       } finally {
         window.fetch = origFetch;
       }
-      const pass = scheduleParsed && teamsParsed && rankParsed && oprParsed && noError && cacheSurvived;
-      record('FTCScout: sample response parses into schedule/teams/rankings/OPR; cache survives a failed refresh', pass,
-        JSON.stringify({ scheduleParsed, teamsParsed, rankParsed, oprParsed, noError, cacheSurvived }));
+      const pass = scheduleParsed && levelsMapped && unknownLevelSkipped && teamsParsed && statsParsed && noError && cacheSurvived;
+      record('FTCScout: real event fixture (USUTCMP) parses — station/alliance, level mapping, rank/RP/OPR; cache survives a failed refresh', pass,
+        JSON.stringify({ scheduleParsed, levelsMapped, unknownLevelSkipped, teamsParsed, statsParsed, noError, cacheSurvived }));
       schedule = savedSchedule;
       eventData = savedEventData;
-    } catch (err) { record('FTCScout: sample response parses into schedule/teams/rankings/OPR; cache survives a failed refresh', false, err.message); }
+    } catch (err) { record('FTCScout: real event fixture (USUTCMP) parses — station/alliance, level mapping, rank/RP/OPR; cache survives a failed refresh', false, err.message); }
 
     // Setup QR round trip via #import= parts: schedule/team list import,
     // Who-Are-You shown, and re-importing a CHANGED setup QR replaces the
