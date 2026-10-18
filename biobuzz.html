@@ -62,8 +62,15 @@
   header .htext h1 { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
   header .htext h1 span { color: var(--yellow); }
   header .htext .subtitle { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-  header .hright { display: flex; align-items: center; gap: 10px; }
-  header img.logo { width: 38px; height: 38px; filter: invert(1); mix-blend-mode: screen; object-fit: contain; }
+  header .hright { display: flex; align-items: center; gap: 8px; }
+  /* Both logos ship with a pure-black background (not the header's actual
+     --surface shade) — screen blend makes pure black contribute nothing,
+     so it reads as transparent against the header while every other
+     color comes through unchanged. No invert here (unlike the old ITKAN
+     mark): these are already light-on-dark, so inverting would wreck
+     their actual colors. */
+  header img.logo { height: 38px; width: auto; max-width: 68px; mix-blend-mode: screen; object-fit: contain; }
+  header .logo-x { font-size: 13px; font-weight: 700; color: var(--yellow); flex-shrink: 0; }
   #netDot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
   #netDot.offline { background: var(--yellow); }
 
@@ -474,13 +481,15 @@
 
 <header>
   <div class="htext" id="headerTitle">
-    <h1>ITKAN — <span>Scouting</span></h1>
+    <h1>ICF — <span>Scouting</span></h1>
     <div class="subtitle">BIOBUZZ 2026</div>
   </div>
   <div class="hright">
     <button class="btn btn-secondary" id="meBtn" style="padding:6px 10px;display:none;">Me</button>
     <div id="netDot"></div>
-    <img class="logo" src="itkaninstitute_logo.jpeg" alt="ITKAN" onerror="this.style.display='none'" />
+    <img class="logo" src="Velocity.png" alt="ICF Velocity Catalyst" onerror="this.style.display='none'" />
+    <span class="logo-x">X</span>
+    <img class="logo" src="Delta.png" alt="ICF Delta Racers" onerror="this.style.display='none'" />
   </div>
 </header>
 
