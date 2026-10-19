@@ -79,18 +79,29 @@
     background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 14px 10px; margin-bottom: 12px;
   }
-  /* Both logos ship with their own pure-black background rather than the
-     app's --surface2 shade, so each gets a matching rounded black
-     container instead of trying to blend it away (fine at header-icon
-     size, but a visible color-shift risk at this much larger size) —
-     the container's own black background fills the rounded corners the
-     image's square edges get clipped into, so there's no color seam. */
+  /* Velocity.png/Delta.png are pre-trimmed to their visible artwork (a
+     small margin, not the old wide black letterboxing) but still carry
+     their own near-black #010101 background, not the app's --surface
+     shade — so each gets that exact black as its container background
+     (same radius/border token as a normal .card) rather than the app's
+     surface color, which would show a visible seam around the image's
+     square edges. The image itself fills ~85% of the container's width;
+     the container has no fixed height, so it hugs the image instead of
+     leaving empty space above/below. */
   .team-banner-logo {
-    flex: 0 1 45%; max-width: 45%; background: #000; border-radius: 12px;
-    padding: 8px; display: flex; align-items: center; justify-content: center; overflow: hidden;
+    flex: 0 1 45%; max-width: 45%; background: #010101; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 6px; display: flex; align-items: center; justify-content: center;
   }
-  .team-banner-logo img { height: 64px; width: auto; max-width: 100%; object-fit: contain; display: block; }
+  .team-banner-logo img { width: 85%; height: auto; display: block; }
   .team-banner-x { font-size: 22px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; }
+  .manual-entry-link { font-size: 12px; color: var(--text-dim); text-decoration: underline; }
+
+  /* Hide the number-spinner arrows everywhere (still shows the numeric
+     keypad on mobile via inputmode="numeric") — the up/down steppers add
+     nothing on a touch form and just eat space next to the field text. */
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
 
   /* ── BOTTOM NAV ── */
   nav {
@@ -539,8 +550,11 @@
         <div class="card-title">Not set up yet</div>
         <div class="hint" style="margin:8px 0;">Scan the lead's Setup QR to get your event, team list, and match schedule.</div>
         <button class="btn btn-primary" id="scoutScanSetupBtn" style="font-size:18px;padding:16px;">📷 Scan Setup QR</button>
+        <div style="margin-top:12px;">
+          <a href="#" id="scoutManualEntryLink" class="manual-entry-link">Enter match info manually instead</a>
+        </div>
       </div>
-      <div class="card">
+      <div class="card" id="matchInfoCard" style="display:none;">
         <div class="card-title">Match Info</div>
         <div class="field">
           <label>Match Type <span class="tag-fromschedule" id="tag-matchType" style="display:none;">from schedule</span></label>
@@ -4734,11 +4748,29 @@ document.getElementById('eventSearchBtn').addEventListener('click', async () => 
 document.getElementById('eventRefreshBtn').addEventListener('click', () => fetchEventData());
 renderEventDataUI();
 
+// "Enter match info manually instead" on the not-set-up card is a
+// session-only override (not persisted) — once chosen it stays revealed
+// for the rest of this page load even if the schedule later empties out
+// again (e.g. Clear Schedule), rather than re-nagging mid-session.
+let manualEntryRevealed = false;
+function renderScoutSetupState() {
+  const showForm = schedule.length > 0 || manualEntryRevealed;
+  const notSetUpCard = document.getElementById('scoutNotSetUpCard');
+  const matchInfoCard = document.getElementById('matchInfoCard');
+  const stepNav = document.querySelector('#page-scout .step-nav');
+  if (notSetUpCard) notSetUpCard.style.display = (schedule.length === 0 && !manualEntryRevealed) ? '' : 'none';
+  if (matchInfoCard) matchInfoCard.style.display = showForm ? '' : 'none';
+  if (stepNav) stepNav.style.display = showForm ? '' : 'none';
+}
+document.getElementById('scoutManualEntryLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  manualEntryRevealed = true;
+  renderScoutSetupState();
+});
 function renderSchedulePreview() {
   const wrap = document.getElementById('schedulePreviewWrap');
   const table = document.getElementById('schedulePreviewTable');
-  const notSetUpCard = document.getElementById('scoutNotSetUpCard');
-  if (notSetUpCard) notSetUpCard.style.display = schedule.length ? 'none' : '';
+  renderScoutSetupState();
   if (!schedule.length) { wrap.style.display = 'none'; table.innerHTML = ''; return; }
   wrap.style.display = '';
   const sorted = [...schedule].sort((a,b) => (MATCH_TYPE_ORDER[a.type]??1) - (MATCH_TYPE_ORDER[b.type]??1) || Number(a.match) - Number(b.match));
@@ -5720,6 +5752,7 @@ async function runSelfTests() {
     lsViewEventFilter: (() => { try { return localStorage.getItem(LS_VIEW_EVENT_FILTER); } catch(e) { return null; } })(),
     lastBackupAt,
     lsLastBackupAt: (() => { try { return localStorage.getItem(LS_LAST_BACKUP_AT); } catch(e) { return null; } })(),
+    manualEntryRevealed,
   };
 
   try {
@@ -7037,6 +7070,37 @@ async function runSelfTests() {
       for (const [id, dataUrl] of Object.entries(imgBackup)) { if (dataUrl) await idbPutImage(id, dataUrl); }
     } catch (err) { record('Reset device: wipeDeviceCompletely() removes every biobuzz2026-prefixed localStorage key and empties the IndexedDB image store', false, err.message); }
 
+    // Scout tab not-set-up state: with no schedule, the step tabs and
+    // Match Info form are hidden (only the banner/"Not set up yet"/Scan
+    // Setup QR/manual-entry link show); the manual-entry link reveals
+    // them without a schedule; a real schedule also reveals them (the
+    // normal Setup-QR path), independent of the manual flag.
+    try {
+      const savedSchedule = schedule, savedManual = manualEntryRevealed;
+      const stepNav = document.querySelector('#page-scout .step-nav');
+      const matchInfoCard = document.getElementById('matchInfoCard');
+      const notSetUpCard = document.getElementById('scoutNotSetUpCard');
+
+      schedule = []; manualEntryRevealed = false;
+      renderSchedulePreview();
+      const hiddenWhenNotSetUp = stepNav.style.display === 'none' && matchInfoCard.style.display === 'none' && notSetUpCard.style.display !== 'none';
+
+      document.getElementById('scoutManualEntryLink').click();
+      const revealedByManualLink = stepNav.style.display !== 'none' && matchInfoCard.style.display !== 'none' && notSetUpCard.style.display === 'none';
+
+      manualEntryRevealed = false;
+      schedule = [{ type: 'Q', match: '1', red1: '1', red2: '2', blue1: '3', blue2: '4' }];
+      renderSchedulePreview();
+      const revealedBySchedule = stepNav.style.display !== 'none' && matchInfoCard.style.display !== 'none' && notSetUpCard.style.display === 'none';
+
+      const pass = hiddenWhenNotSetUp && revealedByManualLink && revealedBySchedule;
+      record('Scout tab not-set-up state: form+tabs hidden with no schedule, manual-entry link reveals them, a real schedule also reveals them', pass,
+        JSON.stringify({ hiddenWhenNotSetUp, revealedByManualLink, revealedBySchedule }));
+
+      schedule = savedSchedule; manualEntryRevealed = savedManual;
+      renderSchedulePreview();
+    } catch (err) { record('Scout tab not-set-up state: form+tabs hidden with no schedule, manual-entry link reveals them, a real schedule also reveals them', false, err.message); }
+
   } finally {
     // Restore real state exactly as it was before any test ran.
     matches = snapshot.matches;
@@ -7092,6 +7156,7 @@ async function runSelfTests() {
     document.getElementById('viewEventFilterSelect').value = viewEventFilter;
     lastBackupAt = snapshot.lastBackupAt;
     try { if (snapshot.lsLastBackupAt !== null) localStorage.setItem(LS_LAST_BACKUP_AT, snapshot.lsLastBackupAt); else localStorage.removeItem(LS_LAST_BACKUP_AT); } catch(e) {}
+    manualEntryRevealed = snapshot.manualEntryRevealed;
     renderSchedulePreview();
     renderPitTeamSuggestions();
     renderData();
