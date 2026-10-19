@@ -999,7 +999,8 @@
     </div>
     <div class="card">
       <div class="card-title">Danger Zone</div>
-      <button class="btn btn-danger" id="clearAllBtn">Clear All Scouting Data</button>
+      <div class="hint">Wipes this device back to a fresh install: every match/pit entry and photo, the schedule and event data, your name/station/team settings, drafts, and Lead/Scouter mode. Back up first if you need this data.</div>
+      <button class="btn btn-danger" id="clearAllBtn">Reset this device (delete ALL data)</button>
     </div>
   </section>
 
@@ -3531,20 +3532,43 @@ document.getElementById('importJsonInput').addEventListener('change', async (e) 
   }
 });
 
-document.getElementById('clearAllBtn').addEventListener('click', async () => {
-  if (!confirm('This will permanently delete ALL match and pit scouting data on this device. Continue?')) return;
-  if (!confirm('Are you absolutely sure? This cannot be undone.')) return;
-  matches = []; pits = [];
-  save(LS_MATCHES, matches);
-  save(LS_PIT, pits);
+// Clears every piece of persisted device state — every localStorage key
+// under the app's biobuzz2026/biobuzz2026_* prefix (a sweep, not a
+// hand-maintained list of LS_ constants, so a future new key is covered
+// automatically) plus the entire IndexedDB images store (covers match/pit
+// photos AND draft ink, which live in the same store). Does NOT reload —
+// that's the caller's job — so ?test=1 can call this directly and assert
+// on the cleared state without navigating away mid-test-run. The only
+// things this deliberately leaves behind are the service worker's own
+// cache (the app itself) and the browser's own unrelated settings.
+async function wipeDeviceCompletely() {
+  const PREFIX = 'biobuzz2026';
+  const keysToRemove = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k === PREFIX || k.startsWith(PREFIX + '_')) keysToRemove.push(k);
+  }
+  keysToRemove.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   try { await idbClearAllImages(); } catch (err) { console.error('Failed to clear image store', err); }
-  imgCache.clear();
-  clearDraftAutosave();
-  clearPitDraftAutosave();
-  resetScoutForm();
-  resetPitForm();
-  showToast('All data cleared');
-  renderData();
+}
+document.getElementById('clearAllBtn').addEventListener('click', async () => {
+  const WARNING = `This will permanently delete EVERYTHING on this device, as if the app were freshly installed:
+
+• Every match and pit entry, plus their photos and auto-path drawings
+• The imported schedule and event data (team list, FTCScout rank/RP/OPR cache, selected event)
+• Your name, station, team #, and alliance size
+• Any in-progress (unsaved) match or pit draft
+• Sent/unsent flags and backup reminders
+• Data page filters and sort preferences
+• Lead/Scouter mode — this device goes back to Scouter
+
+This cannot be undone.`;
+  if (!confirm(WARNING)) return;
+  if (!confirm('Are you absolutely sure? Every entry on this device will be gone forever — there is no way to recover it after this.')) return;
+  const typed = prompt('Type DELETE (all capital letters) to confirm permanent deletion of everything on this device:');
+  if (typed !== 'DELETE') { showToast('Reset cancelled', true); return; }
+  await wipeDeviceCompletely();
+  location.reload();
 });
 
 /* ══════════ DEVICE STORAGE USAGE & PERSISTENCE ══════════ */
@@ -6946,6 +6970,72 @@ async function runSelfTests() {
       matches = savedMatches; pits = savedPits; editingId = savedEditingId; schedule = savedSchedule;
       renderSchedulePreview();
     } catch (err) { record('Scouter reachability: Me sheet "My Saved Entries" lists matches/pits with sent markers and a working Edit button; Scout tab\'s "Not set up yet" card tracks schedule.length', false, err.message); }
+
+    // Reset device (wipeDeviceCompletely): every biobuzz2026-prefixed
+    // localStorage key and the whole IndexedDB image store must be gone
+    // afterward. This test is fully self-contained (its own before/after
+    // snapshot of every prefixed key + every image, not just the specific
+    // ones the outer snapshot above tracks) because wipeDeviceCompletely()
+    // is powerful enough to actually destroy the real device's settings
+    // (alliance size, our team #, scouter name/station, role, ...) if the
+    // restore here were incomplete. Does not test the real button (that
+    // needs real confirm()/prompt() dialogs and a page reload — covered by
+    // the E2E suite instead); calls wipeDeviceCompletely() directly.
+    try {
+      const PREFIX = 'biobuzz2026';
+      const keysBefore = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k === PREFIX || k.startsWith(PREFIX + '_')) keysBefore.push(k);
+      }
+      const lsBackup = {};
+      keysBefore.forEach(k => { lsBackup[k] = localStorage.getItem(k); });
+      const imgIdsBefore = await idbGetAllKeys();
+      const imgBackup = {};
+      for (const id of imgIdsBefore) { imgBackup[id] = await idbGetImage(id); }
+
+      // Populate "every kind of data" directly in localStorage (not via
+      // the in-memory matches/pits/etc, which the outer snapshot already
+      // handles) so this test exercises a real wipe, not a no-op against
+      // already-empty storage.
+      const ts = new Date().toISOString();
+      localStorage.setItem(LS_MATCHES, JSON.stringify([{ id: 'ct_wipe_m1', matchNumber: '1', teamNumber: '1', alliance: 'red', schemaVersion: 7, updatedAt: ts, ts }]));
+      localStorage.setItem(LS_PIT, JSON.stringify([{ id: 'ct_wipe_p1', teamNumber: '2', schemaVersion: 4, updatedAt: ts, ts }]));
+      localStorage.setItem(LS_DRAFT, JSON.stringify({ teamNumber: '9' }));
+      localStorage.setItem(LS_PITDRAFT, JSON.stringify({ teamNumber: '9' }));
+      localStorage.setItem(LS_SCHEDULE, JSON.stringify([{ type: 'Q', match: '1', red1: '1', red2: '2', blue1: '3', blue2: '4' }]));
+      localStorage.setItem(LS_EVENTDATA, JSON.stringify({ eventCode: 'WIPETEST', season: 2026, teams: [{ number: '1', name: '' }], teamStats: { '1': { rank: 1 } } }));
+      localStorage.setItem(LS_ALLIANCE_SIZE, '3');
+      localStorage.setItem(LS_OUR_TEAM, '1234');
+      localStorage.setItem(LS_SCOUTER, 'Wipe Test Scouter');
+      localStorage.setItem(LS_STATION, 'Red 1');
+      localStorage.setItem(LS_ROLE, 'lead');
+      localStorage.setItem(LS_INCLUDE_PRACTICE, '1');
+      localStorage.setItem(LS_VIEW_EVENT_FILTER, 'all');
+      localStorage.setItem(LS_LAST_BACKUP_AT, ts);
+      localStorage.setItem(LS_QR_BUFFER, JSON.stringify({ sess1: { total: 2, parts: { 1: 'x' } } }));
+      const onePxPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+      await idbPutImage('ct_wipe_img1', onePxPng);
+
+      await wipeDeviceCompletely();
+
+      let remainingKeys = 0;
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k === PREFIX || k.startsWith(PREFIX + '_')) remainingKeys++;
+      }
+      const localStorageEmpty = remainingKeys === 0;
+      const imageDbEmpty = (await idbGetAllKeys()).length === 0;
+
+      const pass = localStorageEmpty && imageDbEmpty;
+      record('Reset device: wipeDeviceCompletely() removes every biobuzz2026-prefixed localStorage key and empties the IndexedDB image store', pass,
+        JSON.stringify({ remainingKeys, localStorageEmpty, imageDbEmpty }));
+
+      // Restore the REAL device's data byte-for-byte — this test's own
+      // responsibility, independent of the outer snapshot/finally below.
+      keysBefore.forEach(k => { try { localStorage.setItem(k, lsBackup[k]); } catch (e) {} });
+      for (const [id, dataUrl] of Object.entries(imgBackup)) { if (dataUrl) await idbPutImage(id, dataUrl); }
+    } catch (err) { record('Reset device: wipeDeviceCompletely() removes every biobuzz2026-prefixed localStorage key and empties the IndexedDB image store', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
