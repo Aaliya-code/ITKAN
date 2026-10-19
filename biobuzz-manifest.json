@@ -1,11 +1,14 @@
 {
-  "name": "BIOBUZZ 2026 — Scouting",
-  "short_name": "BioScout",
+  "name": "ICF — BIOBUZZ 2026 Scouting",
+  "short_name": "ICF Scout",
   "description": "FTC 2026-2027 BIOBUZZ Season Scouting App",
   "start_url": "./biobuzz.html",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0f1117",
   "theme_color": "#f0c040",
-  "icons": []
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
 }

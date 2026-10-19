@@ -3,13 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>BIOBUZZ 2026 — Scout</title>
+<title>ICF — BIOBUZZ 2026 Scout</title>
 <link rel="manifest" href="./biobuzz-manifest.json" />
+<link rel="apple-touch-icon" href="./apple-touch-icon.png" />
 <meta name="theme-color" content="#f0c040" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="BioScout" />
+<meta name="apple-mobile-web-app-title" content="ICF Scout" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   /* iOS Safari waits ~300ms after the first tap on a non-form element to
@@ -59,20 +60,37 @@
     align-items: center;
     justify-content: space-between;
   }
+  header .htext .htitle-row { display: flex; align-items: center; gap: 7px; }
   header .htext h1 { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
   header .htext h1 span { color: var(--yellow); }
   header .htext .subtitle { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   header .hright { display: flex; align-items: center; gap: 8px; }
-  /* Both logos ship with a pure-black background (not the header's actual
-     --surface shade) — screen blend makes pure black contribute nothing,
-     so it reads as transparent against the header while every other
-     color comes through unchanged. No invert here (unlike the old ITKAN
-     mark): these are already light-on-dark, so inverting would wreck
-     their actual colors. */
-  header img.logo { height: 38px; width: auto; max-width: 68px; mix-blend-mode: screen; object-fit: contain; }
-  header .logo-x { font-size: 13px; font-weight: 700; color: var(--yellow); flex-shrink: 0; }
-  #netDot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
-  #netDot.offline { background: var(--yellow); }
+  /* Team logos live on the banner card now, not the header (redesign) —
+     see .team-banner below. Header keeps only the title and Me button. */
+  .net-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+  .net-dot.offline { background: var(--yellow); }
+  /* Lead mode: small dot next to the title. Scouter mode: badge on Me's
+     top-right corner instead (#meBtn is position:relative for this). */
+  .net-dot-badge { position: absolute; top: -3px; right: -3px; border: 2px solid var(--surface); }
+
+  /* ── TEAM BANNER (reusable, injected via JS into .team-banner-slot) ── */
+  .team-banner {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 10px; margin-bottom: 12px;
+  }
+  /* Both logos ship with their own pure-black background rather than the
+     app's --surface2 shade, so each gets a matching rounded black
+     container instead of trying to blend it away (fine at header-icon
+     size, but a visible color-shift risk at this much larger size) —
+     the container's own black background fills the rounded corners the
+     image's square edges get clipped into, so there's no color seam. */
+  .team-banner-logo {
+    flex: 0 1 45%; max-width: 45%; background: #000; border-radius: 12px;
+    padding: 8px; display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .team-banner-logo img { height: 64px; width: auto; max-width: 100%; object-fit: contain; display: block; }
+  .team-banner-x { font-size: 22px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; }
 
   /* ── BOTTOM NAV ── */
   nav {
@@ -481,15 +499,17 @@
 
 <header>
   <div class="htext" id="headerTitle">
-    <h1>ICF — <span>Scouting</span></h1>
+    <div class="htitle-row">
+      <h1>ICF — <span>Scouting</span></h1>
+      <div id="netDotLead" class="net-dot" style="display:none;"></div>
+    </div>
     <div class="subtitle">BIOBUZZ 2026</div>
   </div>
   <div class="hright">
-    <button class="btn btn-secondary" id="meBtn" style="padding:6px 10px;display:none;">Me</button>
-    <div id="netDot"></div>
-    <img class="logo" src="Velocity.png" alt="ICF Velocity Catalyst" onerror="this.style.display='none'" />
-    <span class="logo-x">X</span>
-    <img class="logo" src="Delta.png" alt="ICF Delta Racers" onerror="this.style.display='none'" />
+    <button class="btn btn-secondary" id="meBtn" style="padding:6px 10px;display:none;position:relative;">
+      Me
+      <div id="netDotMe" class="net-dot net-dot-badge"></div>
+    </button>
   </div>
 </header>
 
@@ -515,6 +535,7 @@
         <button class="btn btn-primary btn-sm" id="postSaveQrBtn">Show QR</button>
       </div>
       <div class="card" id="scoutNotSetUpCard" style="display:none;text-align:center;">
+        <div class="team-banner-slot"></div>
         <div class="card-title">Not set up yet</div>
         <div class="hint" style="margin:8px 0;">Scan the lead's Setup QR to get your event, team list, and match schedule.</div>
         <button class="btn btn-primary" id="scoutScanSetupBtn" style="font-size:18px;padding:16px;">📷 Scan Setup QR</button>
@@ -871,6 +892,7 @@
 
   <!-- ══════════ EXPORT PAGE ══════════ -->
   <section id="page-export" class="page">
+    <div class="team-banner-slot"></div>
     <div class="card">
       <div class="card-title">Settings</div>
       <div class="field">
@@ -1040,6 +1062,7 @@
 </div>
 
 <div class="review-overlay" id="meSheet" style="display:none;">
+  <div class="team-banner-slot"></div>
   <h2 class="section-title">Me</h2>
   <div class="card" style="text-align:center;">
     <button class="btn btn-primary" id="meScanSetupBtn" style="font-size:18px;padding:16px;">📷 Scan Setup QR</button>
@@ -1074,6 +1097,7 @@
 </div>
 
 <div class="review-overlay" id="whoAreYouOverlay" style="display:none;">
+  <div class="team-banner-slot"></div>
   <h2 class="section-title">Who are you?</h2>
   <div class="card">
     <div class="field">
@@ -1116,6 +1140,18 @@ const LS_STATION = 'biobuzz2026_station';
 const LS_ROLE = 'biobuzz2026_role';
 const LS_SCHEDULE = 'biobuzz2026_schedule';
 const LS_EVENTDATA = 'biobuzz2026_eventdata';
+
+// Reusable team banner (Who-Are-You, Me sheet, Scout's "Not set up yet"
+// card, top of Export) — one definition injected into every
+// .team-banner-slot placeholder, so the two logo <img> tags only ever
+// live in one place in the source.
+const TEAM_BANNER_HTML = `
+  <div class="team-banner">
+    <div class="team-banner-logo"><img src="Velocity.png" alt="ICF Velocity Catalyst" /></div>
+    <span class="team-banner-x">×</span>
+    <div class="team-banner-logo"><img src="Delta.png" alt="ICF Delta Racers" /></div>
+  </div>`;
+document.querySelectorAll('.team-banner-slot').forEach(el => { el.innerHTML = TEAM_BANNER_HTML; });
 
 /* ══════════ ESCAPING ══════════ */
 function esc(s) {
@@ -4289,6 +4325,9 @@ function applyRoleUI() {
   document.querySelector('nav button[data-page="data"]').style.display = isLead ? '' : 'none';
   document.querySelector('nav button[data-page="export"]').style.display = isLead ? '' : 'none';
   document.getElementById('meBtn').style.display = isLead ? 'none' : '';
+  // Online/offline dot: badge on Me (Scouter) vs next to the title (Lead) —
+  // #netDotMe is a child of #meBtn so hiding the button already hides it.
+  document.getElementById('netDotLead').style.display = isLead ? '' : 'none';
   // A scouter device can't be left sitting on a page it no longer has nav access to.
   if (!isLead) {
     const activePage = document.querySelector('.page.active');
@@ -5602,7 +5641,7 @@ function showToast(msg, isError) {
 }
 
 function updateNetDot() {
-  document.getElementById('netDot').classList.toggle('offline', !navigator.onLine);
+  document.querySelectorAll('.net-dot').forEach(el => el.classList.toggle('offline', !navigator.onLine));
 }
 window.addEventListener('online', updateNetDot);
 window.addEventListener('offline', updateNetDot);

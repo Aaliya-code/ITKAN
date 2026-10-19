@@ -1,4 +1,4 @@
-const CACHE = 'biobuzz2026-v19';
+const CACHE = 'biobuzz2026-v20';
 // No './' here: there's no index.html at the site root, only biobuzz.html
 // directly. GitHub Pages 404s a directory with no index, which fails this
 // whole addAll() and leaves the worker stuck "redundant" — Python's dev
@@ -6,6 +6,7 @@ const CACHE = 'biobuzz2026-v19';
 // is why this only ever showed up against the real hosted deployment.
 const ASSETS = [
   './biobuzz.html', './biobuzz-manifest.json', './Velocity.png', './Delta.png',
+  './icon-192.png', './icon-512.png', './apple-touch-icon.png',
   './vendor/qrcode-generator.js', './vendor/jsQR.js',
 ];
 
