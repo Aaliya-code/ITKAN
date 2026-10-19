@@ -1013,8 +1013,12 @@
     </div>
     <div class="card">
       <div class="card-title">Danger Zone</div>
-      <div class="hint">Wipes this device back to a fresh install: every match/pit entry and photo, the schedule and event data, your name/station/team settings, drafts, and Lead/Scouter mode. Back up first if you need this data.</div>
+      <div class="hint">Wipes this device back to a fresh install: every match/pit entry and photo, the schedule and event data, your name/station/team settings, drafts, and Lead/Scouter mode. Back up first if you need this data. This resets only this phone. To reset scouter devices, use Show Reset QR.</div>
       <button class="btn btn-danger" id="clearAllBtn">Reset this device (delete ALL data)</button>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="showResetQrBtn">Show Reset QR</button>
+      </div>
+      <div class="hint">Shows a QR code any scouter device can scan (Me &gt; Scan Setup QR, or the in-app scanner) to wipe itself the same way, without needing the Lead PIN on that device. Expires 15 minutes after you show it. A device with unsent entries is blocked from resetting until it sends them.</div>
     </div>
   </section>
 
@@ -1131,6 +1135,21 @@
   </div>
   <div class="review-actions">
     <button class="btn btn-primary" id="wayDoneBtn">Done</button>
+  </div>
+</div>
+
+<div class="review-overlay" id="resetConfirmOverlay" style="display:none;">
+  <h2 class="section-title">Reset This Device</h2>
+  <div class="card">
+    <div class="hint" id="resetConfirmMessage">The lead wants to reset this device. This deletes ALL scouting data on this device.</div>
+  </div>
+  <div class="card" id="resetBlockedCard" style="display:none;text-align:center;">
+    <div class="hint" id="resetBlockedHint"></div>
+    <button class="btn btn-primary" id="resetBlockedSendBtn">Send my data (QR)</button>
+  </div>
+  <div class="review-actions" id="resetConfirmActions">
+    <button class="btn btn-secondary" id="resetConfirmCancelBtn">Cancel</button>
+    <button class="btn btn-danger" id="resetConfirmGoBtn">Reset this device</button>
   </div>
 </div>
 
@@ -5024,6 +5043,32 @@ const LS_QR_BUFFER = 'biobuzz2026_qrbuffer';
 function loadQrBuffer() { try { return JSON.parse(localStorage.getItem(LS_QR_BUFFER)) || {}; } catch(e) { return {}; } }
 function saveQrBuffer(buf) { try { localStorage.setItem(LS_QR_BUFFER, JSON.stringify(buf)); } catch(e) {} }
 
+// Reset QR (lead-controlled device wipe, Section "Reset QR"): a tiny
+// {k:'reset', id, ts} payload riding the same encode/URL/overlay
+// machinery as every other QR. Expires RESET_EXPIRY_MS after it was
+// shown. "Already used" tracks ids this DEVICE has reached the (not
+// blocked) confirm screen for — NOT ids blocked for unsent entries,
+// since re-scanning the same code after sending is the explicitly
+// intended flow. This tracking is itself biobuzz2026-prefixed, so a
+// completed reset (which wipes every such key) naturally forgets it —
+// fine, since the same code scanned again on a freshly-wiped device is
+// a harmless no-op, and the real intent is letting ONE code reset
+// MANY different scouter devices in turn, not a single-use-ever token.
+const LS_SEEN_RESET_IDS = 'biobuzz2026_seenresetids';
+const RESET_EXPIRY_MS = 15 * 60 * 1000;
+function loadSeenResetIds() {
+  try {
+    const list = JSON.parse(localStorage.getItem(LS_SEEN_RESET_IDS)) || [];
+    const fresh = list.filter(e => Date.now() - e.seenAt < RESET_EXPIRY_MS);
+    return fresh;
+  } catch (e) { return []; }
+}
+function markResetIdSeen(id) {
+  const fresh = loadSeenResetIds();
+  fresh.push({ id, seenAt: Date.now() });
+  try { localStorage.setItem(LS_SEEN_RESET_IDS, JSON.stringify(fresh)); } catch (e) {}
+}
+
 async function handleImportPart(sessionId, partNum, total, dataChunk) {
   const buf = loadQrBuffer();
   if (!buf[sessionId]) buf[sessionId] = { total, parts: {} };
@@ -5046,6 +5091,10 @@ async function handleImportPart(sessionId, partNum, total, dataChunk) {
   if (payload.k === 'setup') {
     applySetupPayload(payload);
     return { complete: true, setup: true };
+  }
+
+  if (payload.k === 'reset') {
+    return { complete: true, ...handleResetPayload(payload) };
   }
 
   const fullEntries = (payload.m || []).map(expandEntry);
@@ -5100,6 +5149,78 @@ document.getElementById('wayDoneBtn').addEventListener('click', () => {
   reapplyAutoFillIfTagged();
 });
 
+/* ══════════ RESET QR (lead-controlled scouter-device wipe) ══════════ */
+async function openResetQr() {
+  const payload = { k: 'reset', id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36), ts: new Date().toISOString() };
+  const b64url = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const sessionId = 'r' + Math.random().toString(36).slice(2, 8); // 'r' = uncompressed, tiny payload doesn't need gzip
+  qrState = { urls: buildQrUrls(sessionId, b64url), index: 0, entryIds: [], pitIds: [], kind: 'reset' };
+  document.querySelector('#qrOverlay .section-title').textContent = 'Reset QR — scan on a scouter device to wipe it';
+  document.getElementById('qrMarkSentBtn').style.display = 'none';
+  renderQrPart();
+  document.getElementById('qrOverlay').style.display = 'block';
+}
+document.getElementById('showResetQrBtn').addEventListener('click', async () => {
+  if (!confirm('Show a Reset QR? Any scouter device that scans it (with no unsent entries) will have ALL its data deleted. The code expires in 15 minutes.')) return;
+  await openResetQr();
+});
+
+// Called from handleImportPart() for a {k:'reset'} payload. Never throws —
+// every branch returns a result object handleScannedUrl()/checkImportHash()
+// use for the status line, and shows whichever screen applies.
+let pendingResetId = null;
+function handleResetPayload(payload) {
+  const id = payload.id, ts = payload.ts;
+  const ageMs = Date.now() - Date.parse(ts || '');
+  if (!id || !ts || Number.isNaN(ageMs) || ageMs > RESET_EXPIRY_MS || ageMs < 0) {
+    return { reset: true, rejected: 'expired' };
+  }
+  const unsentCount = matches.filter(m => !m.sent).length + pits.filter(p => !p.sent).length;
+  if (unsentCount > 0) {
+    // Blocked attempts are never marked "seen" — re-scanning the same
+    // code after sending is the explicitly intended recovery path.
+    showResetBlockedScreen(id, unsentCount);
+    return { reset: true, blocked: true, unsentCount };
+  }
+  const seen = loadSeenResetIds();
+  if (seen.some(e => e.id === id)) {
+    return { reset: true, rejected: 'used' };
+  }
+  markResetIdSeen(id);
+  showResetConfirmScreen(id);
+  return { reset: true, confirmShown: true };
+}
+function showResetConfirmScreen(id) {
+  pendingResetId = id;
+  document.getElementById('resetConfirmMessage').textContent = 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
+  document.getElementById('resetBlockedCard').style.display = 'none';
+  document.getElementById('resetConfirmActions').style.display = 'flex';
+  document.getElementById('resetConfirmOverlay').style.display = 'block';
+}
+function showResetBlockedScreen(id, unsentCount) {
+  pendingResetId = id;
+  document.getElementById('resetConfirmMessage').textContent = 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
+  document.getElementById('resetBlockedHint').textContent = `You have ${unsentCount} unsent ${unsentCount === 1 ? 'entry' : 'entries'} — send them to the lead first, then scan the Reset QR again.`;
+  document.getElementById('resetBlockedCard').style.display = '';
+  document.getElementById('resetConfirmActions').style.display = 'none';
+  document.getElementById('resetConfirmOverlay').style.display = 'block';
+}
+document.getElementById('resetConfirmCancelBtn').addEventListener('click', () => {
+  document.getElementById('resetConfirmOverlay').style.display = 'none';
+  pendingResetId = null;
+});
+document.getElementById('resetBlockedSendBtn').addEventListener('click', () => {
+  document.getElementById('resetConfirmOverlay').style.display = 'none';
+  openQrForEntries(matches.filter(m => !m.sent), pits.filter(p => !p.sent));
+});
+document.getElementById('resetConfirmGoBtn').addEventListener('click', async () => {
+  const typed = prompt('Type DELETE (all capital letters) to confirm permanent deletion of everything on this device:');
+  if (typed !== 'DELETE') return;
+  document.getElementById('resetConfirmOverlay').style.display = 'none';
+  await wipeDeviceCompletely();
+  location.reload();
+});
+
 // #import=<sessionId>.<part>.<total>.<data> on load (e.g. the iPad Camera
 // app scanned a code and opened this URL). Clears the hash immediately so
 // a reload never reprocesses the same part.
@@ -5119,11 +5240,23 @@ async function checkImportHash() {
   if (!sessionId || !partNum || !total) return;
   const result = await handleImportPart(sessionId, partNum, total, data);
   if (result.complete) {
-    showToast(result.error || (result.setup ? 'Event setup loaded' : `QR import: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`), !!result.error);
+    showToast(result.error || resetResultMessage(result) || (result.setup ? 'Event setup loaded' : `QR import: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`), !!result.error || isResetRejection(result));
   } else {
     showToast(`QR part ${result.received} of ${result.total} received — scan the rest`);
   }
 }
+// Shared by both receive paths (in-app scanner + #import= link) for the
+// 3 reset-specific outcomes (expired/already-used/blocked/confirm-shown)
+// — returns null for every non-reset result so callers fall through to
+// their own existing setup/data-merge message.
+function resetResultMessage(result) {
+  if (!result.reset) return null;
+  if (result.rejected === 'expired') return 'Reset code expired';
+  if (result.rejected === 'used') return 'Reset code already used';
+  if (result.blocked) return `Reset blocked — ${result.unsentCount} unsent ${result.unsentCount === 1 ? 'entry' : 'entries'}`;
+  return 'Reset requested — see the confirm screen';
+}
+function isResetRejection(result) { return result.reset && !!result.rejected; }
 
 /* ══════════ IN-APP SCANNER (task 11b, Phase 4) ══════════
    getUserMedia + jsQR. Camera access needs https or localhost — this is
@@ -5190,7 +5323,7 @@ async function handleScannedUrl(text) {
   if (!sessionId || !partNum || !total) return;
   const result = await handleImportPart(sessionId, partNum, total, data);
   document.getElementById('scannerStatus').textContent = result.complete
-    ? (result.error || (result.setup ? 'Event setup loaded' : `Done: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`))
+    ? (result.error || resetResultMessage(result) || (result.setup ? 'Event setup loaded' : `Done: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`))
     : `${result.received} of ${result.total} received — keep scanning`;
   if (result.complete) setTimeout(stopQrScanner, 1500);
 }
@@ -7100,6 +7233,66 @@ async function runSelfTests() {
       schedule = savedSchedule; manualEntryRevealed = savedManual;
       renderSchedulePreview();
     } catch (err) { record('Scout tab not-set-up state: form+tabs hidden with no schedule, manual-entry link reveals them, a real schedule also reveals them', false, err.message); }
+
+    // Reset QR: the decision logic in handleResetPayload() — lead data
+    // untouched by just showing the code; 0 unsent routes to the confirm
+    // screen; unsent entries route to the blocked screen WITHOUT marking
+    // the id used (so re-scanning the same code after sending works);
+    // re-scanning an id that already reached the confirm screen is
+    // rejected as "used"; an old timestamp is rejected as "expired". The
+    // actual wipe+reload (once the confirm screen's "Reset this device"
+    // is tapped) reuses the already-tested wipeDeviceCompletely() and is
+    // exercised for real end to end by the E2E suite instead.
+    try {
+      const savedMatches = matches, savedPits = pits, savedSchedule = schedule, savedEventData = JSON.parse(JSON.stringify(eventData));
+      const savedSeenResetIds = localStorage.getItem(LS_SEEN_RESET_IDS);
+      const savedPendingResetId = pendingResetId;
+
+      matches = [{ id: 'ct_reset_lead_m1', matchNumber: '1', teamNumber: '1', alliance: 'red', schemaVersion: 7, sent: true }];
+      pits = [{ id: 'ct_reset_lead_p1', teamNumber: '2', schemaVersion: 4, sent: true }];
+      const beforeShow = JSON.stringify({ matches, pits, schedule, eventData });
+      await openResetQr();
+      const afterShow = JSON.stringify({ matches, pits, schedule, eventData });
+      const leadDataUntouched = beforeShow === afterShow;
+      document.getElementById('qrOverlay').style.display = 'none';
+
+      const freshPayload = { k: 'reset', id: 'ct_reset_fresh', ts: new Date().toISOString() };
+      const freshResult = handleResetPayload(freshPayload);
+      const freshConfirmShown = freshResult.confirmShown === true &&
+        document.getElementById('resetConfirmOverlay').style.display !== 'none' &&
+        document.getElementById('resetConfirmActions').style.display !== 'none' &&
+        document.getElementById('resetBlockedCard').style.display === 'none';
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+
+      matches = [{ id: 'ct_reset_m2', matchNumber: '2', teamNumber: '2', alliance: 'red', schemaVersion: 7, sent: false }];
+      const blockedPayload = { k: 'reset', id: 'ct_reset_blocked', ts: new Date().toISOString() };
+      const blockedResult = handleResetPayload(blockedPayload);
+      const blockedShown = blockedResult.blocked === true && blockedResult.unsentCount === 1 &&
+        document.getElementById('resetBlockedCard').style.display !== 'none' &&
+        document.getElementById('resetConfirmActions').style.display === 'none';
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+
+      matches = matches.map(m => ({ ...m, sent: true })); // "send" the unsent entry
+      const rescanResult = handleResetPayload(blockedPayload); // same id, now 0 unsent
+      const rescanAllowedAfterSending = rescanResult.confirmShown === true;
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+
+      const reusedResult = handleResetPayload(blockedPayload); // same id again, already confirmed once
+      const rejectedAsUsed = reusedResult.rejected === 'used';
+
+      const expiredPayload = { k: 'reset', id: 'ct_reset_expired', ts: new Date(Date.now() - (RESET_EXPIRY_MS + 60000)).toISOString() };
+      const expiredResult = handleResetPayload(expiredPayload);
+      const rejectedAsExpired = expiredResult.rejected === 'expired';
+
+      const pass = leadDataUntouched && freshConfirmShown && blockedShown && rescanAllowedAfterSending && rejectedAsUsed && rejectedAsExpired;
+      record('Reset QR: lead data untouched by showing the code; 0-unsent shows confirm; unsent blocks without marking used (re-scannable after sending); re-confirming the same id is rejected as used; an old timestamp is rejected as expired', pass,
+        JSON.stringify({ leadDataUntouched, freshConfirmShown, blockedShown, rescanAllowedAfterSending, rejectedAsUsed, rejectedAsExpired }));
+
+      matches = savedMatches; pits = savedPits; schedule = savedSchedule; eventData = savedEventData;
+      try { if (savedSeenResetIds !== null) localStorage.setItem(LS_SEEN_RESET_IDS, savedSeenResetIds); else localStorage.removeItem(LS_SEEN_RESET_IDS); } catch (e) {}
+      pendingResetId = savedPendingResetId;
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+    } catch (err) { record('Reset QR: lead data untouched by showing the code; 0-unsent shows confirm; unsent blocks without marking used (re-scannable after sending); re-confirming the same id is rejected as used; an old timestamp is rejected as expired', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
