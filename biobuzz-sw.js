@@ -1,4 +1,4 @@
-const CACHE = 'biobuzz2026-v25';
+const CACHE = 'biobuzz2026-v26';
 // No './' here: there's no index.html at the site root, only biobuzz.html
 // directly. GitHub Pages 404s a directory with no index, which fails this
 // whole addAll() and leaves the worker stuck "redundant" — Python's dev
