@@ -380,6 +380,30 @@
   /* ── SEGMENTED CONTROL (match type, flower owner/bottom-nectar) ── */
   .seg-row { display: flex; gap: 6px; }
   .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+  /* ── PIT TEAM PICKER ── */
+  .pit-picker-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .pit-picker-hide-done { display: flex; align-items: center; gap: 6px; }
+  .pit-picker-hide-done .tname { font-size: 11px; color: var(--text-dim); }
+  .pit-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
+  /* ~4 rows so the rest of the form stays visible below without scrolling
+     past the whole roster first — "Show all" switches to a scrollable,
+     unbounded-height list instead. */
+  .pit-picker-grid.collapsed { max-height: 196px; overflow: hidden; }
+  .pit-picker-grid:not(.collapsed) { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .pit-pick-team {
+    min-height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 4px 4px; position: relative; cursor: pointer; touch-action: manipulation;
+  }
+  .pit-pick-team .pit-pick-num { font-size: 13px; font-weight: 700; }
+  .pit-pick-team .pit-pick-name {
+    font-size: 10px; font-weight: 400; color: var(--text-dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 100%;
+  }
+  .pit-pick-team.done { border-color: var(--green); }
+  .pit-pick-team.done .pit-pick-num { color: var(--green); }
+  .pit-pick-team.done .pit-pick-check { position: absolute; top: 2px; right: 4px; font-size: 9px; color: var(--green); font-weight: 700; }
   .seg-row button {
     flex: 1; min-height: 44px; padding: 10px 6px; border-radius: 8px; border: 2px solid var(--border);
     background: var(--surface2); color: var(--text-dim); font-weight: 700; font-size: 12px; cursor: pointer;
@@ -731,8 +755,18 @@
       <div class="card-title">Pit Scouting</div>
       <div class="field">
         <label>Team Number</label>
-        <input type="number" id="p-teamNumber" inputmode="numeric" placeholder="e.g. 12345" />
-        <div class="chip-row" id="pitTeamSuggestions" style="display:none;"></div>
+        <input type="text" id="p-teamNumber" inputmode="search" enterkeyhint="search" placeholder="e.g. 12345, or type a team name" />
+        <div id="pitTeamPicker" style="display:none;margin-top:8px;">
+          <div class="pit-picker-header">
+            <span id="pitPickerCounter" class="hint"></span>
+            <div class="pit-picker-hide-done">
+              <span class="tname">Hide done</span>
+              <div class="switch" id="pitHideDoneToggle"></div>
+            </div>
+          </div>
+          <div class="pit-picker-grid collapsed" id="pitTeamGrid"></div>
+          <button type="button" class="btn btn-secondary btn-sm" id="pitPickerShowAllBtn" style="width:100%;margin-top:6px;"></button>
+        </div>
       </div>
       <div class="field">
         <label>Team Name</label>
@@ -2660,16 +2694,51 @@ function restorePitFieldsUI() {
 // Team-number suggestions from the event's team list (Section C: either an
 // FTCScout fetch on the lead's device, or whatever a Setup QR brought in on
 // a scouter's) — tap a chip instead of typing.
+// Session-only (not persisted, like manualEntryRevealed) — "Hide done"
+// defaults on each fresh load anyway, so there's nothing meaningful lost
+// by not remembering it across reloads.
+let pitHideDone = true;
+let pitPickerExpanded = false;
 function renderPitTeamSuggestions() {
-  const wrap = document.getElementById('pitTeamSuggestions');
+  const wrap = document.getElementById('pitTeamPicker');
+  const grid = document.getElementById('pitTeamGrid');
   const list = getEventTeamList();
-  if (!list.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
-  const typed = (pitDraft.teamNumber || '').trim();
-  const filtered = (typed ? list.filter(t => t.n.startsWith(typed)) : list).slice(0, 12);
-  if (!filtered.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  if (!list.length) { wrap.style.display = 'none'; grid.innerHTML = ''; return; }
   wrap.style.display = '';
-  wrap.innerHTML = filtered.map(t => `<button type="button" class="btn btn-secondary btn-sm" data-pick-team="${esc(t.n)}">${esc(t.n)}${t.nm ? ' · ' + esc(t.nm) : ''}</button>`).join('');
-  wrap.querySelectorAll('[data-pick-team]').forEach(btn => {
+
+  // "Done" = at least one pit entry on THIS device for that team, not
+  // whether it's been sent/synced — matches the duplicate-warning's own
+  // definition of "already pit-scouted" (checkPitDuplicate()).
+  const doneTeams = new Set(pits.map(p => normTeam(p.teamNumber)));
+  const sorted = [...list].sort((a, b) => Number(a.n) - Number(b.n));
+  const doneCount = sorted.filter(t => doneTeams.has(t.n)).length;
+  document.getElementById('pitPickerCounter').textContent = `${doneCount} of ${sorted.length} done (this device)`;
+
+  const typed = (pitDraft.teamNumber || '').trim();
+  const typedLower = typed.toLowerCase();
+  let filtered = typed
+    ? sorted.filter(t => t.n.startsWith(typed) || (t.nm && t.nm.toLowerCase().includes(typedLower)))
+    : sorted;
+  if (pitHideDone) filtered = filtered.filter(t => !doneTeams.has(t.n));
+
+  grid.classList.toggle('collapsed', !pitPickerExpanded);
+  const showAllBtn = document.getElementById('pitPickerShowAllBtn');
+  showAllBtn.style.display = filtered.length ? '' : 'none';
+  showAllBtn.textContent = pitPickerExpanded ? 'Show less' : `Show all (${filtered.length})`;
+
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="hint" style="grid-column:1/-1;">No teams match.</div>';
+    return;
+  }
+  grid.innerHTML = filtered.map(t => {
+    const isDone = doneTeams.has(t.n);
+    return `<button type="button" class="pit-pick-team${isDone ? ' done' : ''}" data-pick-team="${esc(t.n)}">
+      <span class="pit-pick-num">#${esc(t.n)}</span>
+      ${t.nm ? `<span class="pit-pick-name">${esc(t.nm)}</span>` : ''}
+      ${isDone ? '<span class="pit-pick-check">✓</span>' : ''}
+    </button>`;
+  }).join('');
+  grid.querySelectorAll('[data-pick-team]').forEach(btn => {
     btn.addEventListener('click', () => {
       const n = btn.dataset.pickTeam;
       pitDraft.teamNumber = n;
@@ -2680,6 +2749,16 @@ function renderPitTeamSuggestions() {
     });
   });
 }
+document.getElementById('pitHideDoneToggle').classList.toggle('on', pitHideDone);
+document.getElementById('pitHideDoneToggle').addEventListener('click', () => {
+  pitHideDone = !pitHideDone;
+  document.getElementById('pitHideDoneToggle').classList.toggle('on', pitHideDone);
+  renderPitTeamSuggestions();
+});
+document.getElementById('pitPickerShowAllBtn').addEventListener('click', () => {
+  pitPickerExpanded = !pitPickerExpanded;
+  renderPitTeamSuggestions();
+});
 
 function resetPitForm() {
   document.getElementById('pitDupWarning').style.display = 'none';
@@ -7308,6 +7387,56 @@ async function runSelfTests() {
       pendingResetId = savedPendingResetId;
       document.getElementById('resetConfirmOverlay').style.display = 'none';
     } catch (err) { record('Reset QR: lead data untouched by showing the code; 0-unsent shows confirm; unsent blocks without marking used (re-scannable after sending); re-confirming the same id is rejected as used; an old timestamp is rejected as expired', false, err.message); }
+
+    // Pit team picker: full roster (no 12-cap), done counter/marking,
+    // filter by number AND by name, and Hide done actually hiding them.
+    try {
+      const savedPits = pits, savedEventData = JSON.parse(JSON.stringify(eventData));
+      const savedPitDraft = JSON.parse(JSON.stringify(pitDraft));
+      const savedHideDone = pitHideDone, savedExpanded = pitPickerExpanded;
+
+      eventData.teams = [];
+      for (let i = 1; i <= 20; i++) eventData.teams.push({ number: String(9000 + i), name: `Fixture ${i}` });
+      const ts = new Date().toISOString();
+      pits = [];
+      for (let i = 1; i <= 5; i++) {
+        pits.push({ id: `ct_pitpick_${i}`, teamNumber: String(9000 + i), teamName: '', drivetrain: '', scouter: 'T', canHive: false, canFlower: false, canGarden: false, canParkLZ: false, intake: [], routines: [], preferredSide: '', driverPractice: '', notes: '', photoIds: [], sent: false, eventCode: '', season: null, schemaVersion: 4, updatedAt: ts, ts });
+      }
+
+      pitDraft.teamNumber = '';
+      pitHideDone = false;
+      pitPickerExpanded = true;
+      renderPitTeamSuggestions();
+
+      const gridItems = () => [...document.querySelectorAll('#pitTeamGrid .pit-pick-team')];
+      const allTeamsListed = gridItems().length === 20; // no 12-cap, all 20 fixture teams render
+      const counterText = document.getElementById('pitPickerCounter').textContent;
+      const counterCorrect = counterText === '5 of 20 done (this device)';
+      const doneMarked = gridItems().filter(el => el.classList.contains('done')).length === 5;
+
+      pitDraft.teamNumber = '900';
+      renderPitTeamSuggestions();
+      const numResults = gridItems();
+      const filterByNumberWorks = numResults.length === 9 && numResults.every(el => el.dataset.pickTeam.startsWith('900'));
+
+      pitDraft.teamNumber = 'Fixture 17';
+      renderPitTeamSuggestions();
+      const nameResults = gridItems();
+      const filterByNameWorks = nameResults.length === 1 && nameResults[0].dataset.pickTeam === '9017';
+
+      pitDraft.teamNumber = '';
+      pitHideDone = true;
+      renderPitTeamSuggestions();
+      const afterHideDone = gridItems();
+      const hideDoneWorks = afterHideDone.length === 15 && afterHideDone.every(el => !el.classList.contains('done'));
+
+      const pass = allTeamsListed && counterCorrect && doneMarked && filterByNumberWorks && filterByNameWorks && hideDoneWorks;
+      record('Pit team picker: lists ALL fixture teams (no 12 cap), correct done counter/marking, filters by number and by name, Hide done toggle actually hides them', pass,
+        JSON.stringify({ allTeamsListed, counterText, counterCorrect, doneMarked, filterByNumberWorks, filterByNameWorks, hideDoneWorks }));
+
+      pits = savedPits; eventData = savedEventData; pitDraft = savedPitDraft; pitHideDone = savedHideDone; pitPickerExpanded = savedExpanded;
+      renderPitTeamSuggestions();
+    } catch (err) { record('Pit team picker: lists ALL fixture teams (no 12 cap), correct done counter/marking, filters by number and by name, Hide done toggle actually hides them', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
