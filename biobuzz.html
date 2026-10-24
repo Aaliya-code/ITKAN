@@ -437,10 +437,12 @@
   .event-pick-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .event-pick-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .event-pick-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .event-pick-badges { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .event-pick-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; flex-shrink: 0; white-space: nowrap; }
   .event-pick-badge.upcoming { background: var(--blue-dim); color: var(--blue); }
   .event-pick-badge.live { background: var(--green); color: #0f1117; }
   .event-pick-badge.completed { background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
+  .event-pick-badge.nomatches { background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); font-weight: 600; }
   .seg-row button {
     flex: 1; min-height: 44px; padding: 10px 6px; border-radius: 8px; border: 2px solid var(--border);
     background: var(--surface2); color: var(--text-dim); font-weight: 700; font-size: 12px; cursor: pointer;
@@ -972,6 +974,7 @@
     </div>
 
     <div id="dstep-pit" class="step">
+      <div class="hint" id="pitStatus" style="display:none;margin-bottom:8px;"></div>
       <div id="pitList"></div>
     </div>
   </section>
@@ -3170,10 +3173,16 @@ function renderRankings() {
   const lines = [`${eventData.eventName || eventData.eventCode} (${eventData.eventCode})`];
   lines.push(eventData.lastUpdated ? `Last updated ${new Date(eventData.lastUpdated).toLocaleString()}` : 'Never fetched yet');
   if (eventData.lastError) lines.push(`⚠ FTCScout unavailable — showing saved data (${eventData.lastError})`);
+  const avail = eventDataAvailability();
+  const availMsg = eventAvailabilityMessage(avail);
+  if (availMsg) lines.push(availMsg);
   statusEl.innerHTML = lines.map(esc).join('<br>');
 
   const rows = rankingsRows();
-  if (!rows.length) { table.innerHTML = '<tr><td class="empty-state" style="border:none;">No teams yet for this event.</td></tr>'; return; }
+  if (!rows.length) {
+    table.innerHTML = `<tr><td class="empty-state" style="border:none;">${esc(avail && avail.state === 'empty' ? 'No teams yet — see the status above.' : 'No teams yet for this event.')}</td></tr>`;
+    return;
+  }
   const col = RANKINGS_COLUMNS.find(c => c.key === rankingsSortKey) || RANKINGS_COLUMNS[1];
   const valOf = col.val || (r => Number(r[col.key]) || 0);
   rows.sort((a, b) => (valOf(a) - valOf(b)) * rankingsSortDir);
@@ -3448,6 +3457,13 @@ function renderTeamOverlay(team) {
 
 function renderPitList() {
   const el = document.getElementById('pitList');
+  const statusEl = document.getElementById('pitStatus');
+  const avail = eventDataAvailability();
+  const availMsg = eventAvailabilityMessage(avail);
+  if (statusEl) {
+    statusEl.textContent = availMsg || '';
+    statusEl.style.display = availMsg ? '' : 'none';
+  }
   const scoutedNorms = new Set(pits.map(p => normTeam(p.teamNumber)));
   const missing = getEventTeamList().filter(t => !scoutedNorms.has(t.n));
   const missingHtml = missing.length ? `
@@ -3455,7 +3471,10 @@ function renderPitList() {
       <div class="card-title">Not Pit-Scouted Yet (${missing.length})</div>
       <div class="chip-row">${missing.map(t => `<span class="btn btn-secondary btn-sm" style="pointer-events:none;">#${esc(t.n)}${t.nm ? ' · ' + esc(t.nm) : ''}</span>`).join('')}</div>
     </div>` : '';
-  if (!pits.length) { el.innerHTML = missingHtml || '<div class="empty-state">No pit entries yet.</div>'; return; }
+  if (!pits.length) {
+    el.innerHTML = missingHtml || `<div class="empty-state">${esc(avail && avail.state === 'empty' ? 'No teams yet — see the status above.' : 'No pit entries yet.')}</div>`;
+    return;
+  }
   const sorted = [...pits].sort((a,b) => Number(normTeam(a.teamNumber))-Number(normTeam(b.teamNumber)));
   el.innerHTML = missingHtml + sorted.map(p => `
     <div class="entry">
@@ -4801,6 +4820,35 @@ function getEventTeamList() {
   });
   return Array.from(seen, ([n, nm]) => ({ n, nm }));
 }
+// Describes what the selected event actually has, so Settings/Rankings/Pit
+// can show a clear reason instead of going blank/unexplained after "Event
+// data refreshed" for an event FTCScout hasn't fully populated yet — a
+// build day or an event that hasn't started has no teams AND no matches; a
+// published-roster-but-no-schedule-yet event has teams but no matches;
+// an event that's just started may have matches but no rank/RP/OPR
+// computed yet. null means no event is selected at all (unchanged,
+// existing "no event selected" messages still apply).
+function eventDataAvailability() {
+  if (!eventData.eventCode) return null;
+  const teamCount = (eventData.teams || []).length;
+  const matchCount = schedule.length;
+  const hasStats = Object.values(eventData.teamStats || {}).some(s => s && (s.rank != null || s.rp != null || s.opr != null));
+  let state;
+  if (!teamCount && !matchCount) state = 'empty';
+  else if (!matchCount) state = 'teams-only';
+  else if (!hasStats) state = 'no-rankings';
+  else state = 'full';
+  return { state, teamCount, matchCount };
+}
+function eventAvailabilityMessage(avail) {
+  if (!avail) return null;
+  switch (avail.state) {
+    case 'empty': return 'This event has no matches or rankings on FTCScout yet (build day / not started).';
+    case 'teams-only': return `Teams loaded (${avail.teamCount}) — schedule not published yet.`;
+    case 'no-rankings': return `Schedule loaded (${avail.matchCount} match${avail.matchCount === 1 ? '' : 'es'}) — rankings not available yet.`;
+    default: return null;
+  }
+}
 
 /* ══════════ FTCSCOUT EVENT DATA (Section B, Lead only) ══════════
    VERIFIED 2026-10-17 against the live API (api.ftcscout.org/graphql),
@@ -4905,7 +4953,7 @@ const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
        localStorage (LS_EVENT_CACHE_OURS) same as before.
      - recentEvents: last 5 selected events (any source), LS_RECENT_EVENTS.
        Pure localStorage, no network involved, ever — always available. */
-const EVENT_LIST_FIELDS = `season code name start end location { city state country } type started ongoing finished regionCode`;
+const EVENT_LIST_FIELDS = `season code name start end location { city state country } type started ongoing finished regionCode hasMatches`;
 const ALL_EVENTS_QUERY = `query($season: Int!, $limit: Int) {
   eventsSearch(season: $season, limit: $limit) { ${EVENT_LIST_FIELDS} }
 }`;
@@ -4948,13 +4996,25 @@ function badgeForEvent(ev) {
   if (ev.ongoing) return { label: 'Live', cls: 'live' };
   return { label: 'Upcoming', cls: 'upcoming' };
 }
+// FTCScout's own EventType enum, human-readable — a build day/scrimmage/
+// kickoff/workshop never has match data, so hasMatches:false on one of
+// these isn't a bug or something-to-wait-for, just what that event IS.
+const EVENT_TYPE_LABELS = {
+  Scrimmage: 'Scrimmage', LeagueMeet: 'League Meet', Qualifier: 'Qualifier', LeagueTournament: 'League Tournament',
+  Championship: 'Championship', Other: 'Other', FIRSTChampionship: 'FIRST Championship', SuperQualifier: 'Super Qualifier',
+  InnovationChallenge: 'Innovation Challenge', OffSeason: 'Off-Season', Kickoff: 'Kickoff', Workshop: 'Workshop',
+  DemoExhibition: 'Demo/Exhibition', VolunteerSignup: 'Volunteer Signup', PracticeDay: 'Practice Day', Premier: 'Premier',
+  NonAdvancement: 'Non-Advancement', Pilot: 'Pilot',
+};
 function eventPickRowHtml(ev) {
   const badge = badgeForEvent(ev);
   const loc = ev.location ? [ev.location.city, ev.location.state].filter(Boolean).join(', ') : '';
+  const noMatchesTag = ev.hasMatches === false
+    ? `<span class="event-pick-badge nomatches">${esc(EVENT_TYPE_LABELS[ev.type] || 'No matches yet')}</span>` : '';
   return `<button type="button" class="event-pick-row" data-ev-season="${ev.season}" data-ev-code="${esc(ev.code)}">
     <div class="event-pick-main">
       <span class="event-pick-name">${esc(ev.name)}</span>
-      <span class="event-pick-badge ${badge.cls}">${badge.label}</span>
+      <span class="event-pick-badges">${noMatchesTag}<span class="event-pick-badge ${badge.cls}">${badge.label}</span></span>
     </div>
     <div class="event-pick-sub">${esc(fmtEventDates(ev.start, ev.end))}${loc ? ' · ' + esc(loc) : ''}</div>
   </button>`;
@@ -5188,6 +5248,8 @@ function renderEventDataUI() {
   const lines = [`${eventData.eventName || eventData.eventCode} (${eventData.eventCode})`];
   lines.push(eventData.lastUpdated ? `Last updated ${new Date(eventData.lastUpdated).toLocaleString()}` : 'Never fetched yet');
   if (eventData.lastError) lines.push(`⚠ FTCScout unavailable — showing saved data (${eventData.lastError})`);
+  const availMsg = eventAvailabilityMessage(eventDataAvailability());
+  if (availMsg) lines.push(availMsg);
   let html = lines.map(esc).join('<br>');
   if (eventData.season && eventData.eventCode) {
     const ftcscoutUrl = `https://ftcscout.org/events/${eventData.season}/${encodeURIComponent(eventData.eventCode)}`;
@@ -7407,6 +7469,77 @@ async function runSelfTests() {
       eventData = savedEventData;
     } catch (err) { record('FTCScout: real event fixture (USUTCMP) parses — station/alliance, level mapping, rank/RP/OPR; cache survives a failed refresh', false, err.message); }
 
+    // FTCScout: an event with no teams/matches yet (a build day, or one
+    // that hasn't started), and one with a published roster but no
+    // schedule yet, must show a clear reason — not just go blank — in
+    // Settings, Rankings, and Pit, and must still LIST whichever teams do
+    // exist rather than hiding them. See eventDataAvailability() above
+    // getEventTeamList() for the state machine this exercises.
+    try {
+      const savedSchedule = schedule, savedEventData = JSON.parse(JSON.stringify(eventData)), savedPits = pits;
+      const origFetch = window.fetch;
+      let emptyOk, teamsOnlyOk;
+      try {
+        pits = pits.filter(p => !['19101', '19102'].includes(normTeam(p.teamNumber))); // keep this test's "missing" count deterministic
+
+        // (a) No teams, no matches — e.g. a build day.
+        eventData = blankEventData();
+        eventData.eventCode = 'BUILDDAY1'; eventData.season = 2026;
+        schedule = [];
+        window.fetch = async (url, opts) => {
+          const body = JSON.parse(opts.body);
+          if (body.query.includes('matchNum')) return { ok: true, json: async () => ({ data: { eventByCode: { name: 'Build Day', code: 'BUILDDAY1', teams: [], matches: [] } } }) };
+          return { ok: true, json: async () => ({ data: { eventByCode: { teams: [] } } }) };
+        };
+        await fetchEventData(true);
+        const avail1 = eventDataAvailability();
+        const settingsHtml1 = document.getElementById('eventDataStatus').innerHTML;
+        const rankingsHtml1 = document.getElementById('rankingsStatus').innerHTML;
+        const pitStatusEl1 = document.getElementById('pitStatus');
+        emptyOk = avail1 && avail1.state === 'empty' &&
+          /no matches or rankings on FTCScout/i.test(settingsHtml1) &&
+          /no matches or rankings on FTCScout/i.test(rankingsHtml1) &&
+          /no matches or rankings on FTCScout/i.test(pitStatusEl1.textContent) &&
+          pitStatusEl1.style.display !== 'none';
+
+        // (b) Teams loaded (roster published), schedule not published yet
+        // — the teams must still be LISTED in Rankings/Pit, not hidden.
+        eventData = blankEventData();
+        eventData.eventCode = 'ROSTERONLY1'; eventData.season = 2026;
+        schedule = [];
+        window.fetch = async (url, opts) => {
+          const body = JSON.parse(opts.body);
+          if (body.query.includes('matchNum')) {
+            return { ok: true, json: async () => ({ data: { eventByCode: {
+              name: 'Roster Only Event', code: 'ROSTERONLY1',
+              teams: [{ team: { number: 19101, name: 'Team A' } }, { team: { number: 19102, name: 'Team B' } }],
+              matches: [],
+            } } }) };
+          }
+          return { ok: true, json: async () => ({ data: { eventByCode: { teams: [] } } }) };
+        };
+        await fetchEventData(true);
+        const avail2 = eventDataAvailability();
+        const settingsHtml2 = document.getElementById('eventDataStatus').innerHTML;
+        const rankingsHtml2 = document.getElementById('rankingsStatus').innerHTML;
+        const rankingsRowCount = document.querySelectorAll('#rankingsTable tr.rankings-row').length;
+        const pitMissingChips = document.querySelectorAll('#pitList .chip-row .btn-sm').length;
+        teamsOnlyOk = avail2 && avail2.state === 'teams-only' && avail2.teamCount === 2 &&
+          /Teams loaded \(2\)/.test(settingsHtml2) && /Teams loaded \(2\)/.test(rankingsHtml2) &&
+          rankingsRowCount === 2 && pitMissingChips === 2;
+      } finally {
+        window.fetch = origFetch;
+        schedule = savedSchedule;
+        eventData = savedEventData;
+        pits = savedPits;
+        renderData();
+        renderEventDataUI();
+      }
+      const pass = emptyOk && teamsOnlyOk;
+      record('FTCScout event with no teams/matches shows a clear reason (not blank) in Settings/Rankings/Pit; a roster-only event still lists its teams', pass,
+        JSON.stringify({ emptyOk, teamsOnlyOk }));
+    } catch (err) { record('FTCScout event with no teams/matches shows a clear reason (not blank) in Settings/Rankings/Pit; a roster-only event still lists its teams', false, err.message); }
+
     // Event Picker: fixture responses for "our events"/"this week"/search,
     // tap-to-select, the Recent list, and the offline state — see the
     // EVENT PICKER doc comment above for why "this week" and search both
@@ -7417,7 +7550,7 @@ async function runSelfTests() {
         savedOurTeam = ourTeamNumber, savedEventData = JSON.parse(JSON.stringify(eventData)), savedPickerErr = _pickerFetchError;
       const origFetch = window.fetch, origFetchEventData = fetchEventData;
       const origOnLineDesc = Object.getOwnPropertyDescriptor(navigator, 'onLine');
-      let weekEventsOk, oursEventsOk, searchOk, tapSelectsOk, recentWorksOk, offlineOk;
+      let weekEventsOk, oursEventsOk, searchOk, noMatchesTagOk, tapSelectsOk, recentWorksOk, offlineOk;
       try {
         allEventsCache = null; ourEventsCache = null; recentEvents = [];
         ourTeamNumber = '9999';
@@ -7428,14 +7561,18 @@ async function runSelfTests() {
           const d = new Date(); d.setDate(d.getDate() + daysOffset);
           return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         };
-        const makeEv = (code, name, city, state, startOffset, endOffset) => ({
+        const makeEv = (code, name, city, state, startOffset, endOffset, extra) => ({
           season: FTCSCOUT_CURRENT_SEASON, code, name, start: iso(startOffset), end: iso(endOffset),
           location: { city, state, country: 'USA' }, type: 'Qualifier', regionCode: 'USXX',
           started: startOffset <= 0, ongoing: startOffset <= 0 && endOffset >= 0, finished: endOffset < 0,
+          hasMatches: true, ...extra,
         });
         const thisWeekEvent = makeEv('WEEKEV1', 'This Week Qualifier', 'Springfield', 'IL', 2, 2);
         const pastEvent = makeEv('PASTEV1', 'Old Qualifier', 'Springfield', 'IL', -40, -40);
-        const farFutureEvent = makeEv('FAREV1', 'Far Future Championship', 'Austin', 'TX', 60, 61);
+        // hasMatches:false + a non-competition type — exercises the Event
+        // Picker's "no matches" tag (a build day/workshop never has match
+        // data; that's not something to wait for).
+        const farFutureEvent = makeEv('FAREV1', 'Far Future Championship', 'Austin', 'TX', 60, 61, { hasMatches: false, type: 'Workshop' });
         const allEventsFixture = [thisWeekEvent, pastEvent, farFutureEvent];
         const ourUpcoming = makeEv('OURUP1', 'Our Upcoming Qualifier', 'Topeka', 'KS', 5, 5);
         const ourPast = makeEv('OURPAST1', 'Our Past Qualifier', 'Topeka', 'KS', -10, -10);
@@ -7477,6 +7614,7 @@ async function runSelfTests() {
         renderEventPickerSections(); // bypasses the 300ms debounce for a deterministic check
         const searchHtml = document.getElementById('eventPickerSearchResultsList').innerHTML;
         searchOk = searchHtml.includes('Far Future Championship') && !searchHtml.includes('This Week Qualifier');
+        noMatchesTagOk = /event-pick-badge nomatches">Workshop</.test(searchHtml);
 
         // 3. Tap-to-select: clicking a rendered row runs selectPickerEvent
         // (sets eventData, pushes to Recent, closes the picker).
@@ -7518,10 +7656,10 @@ async function runSelfTests() {
         allEventsCache = savedAll; ourEventsCache = savedOurs; recentEvents = savedRecent;
         ourTeamNumber = savedOurTeam; eventData = savedEventData; _pickerFetchError = savedPickerErr;
       }
-      const pass = weekEventsOk && oursEventsOk && searchOk && tapSelectsOk && recentWorksOk && offlineOk;
-      record('Event Picker: "this week"/"our events"/search fixtures, tap-to-select, Recent list, offline state', pass,
-        JSON.stringify({ weekEventsOk, oursEventsOk, searchOk, tapSelectsOk, recentWorksOk, offlineOk }));
-    } catch (err) { record('Event Picker: "this week"/"our events"/search fixtures, tap-to-select, Recent list, offline state', false, err.message); }
+      const pass = weekEventsOk && oursEventsOk && searchOk && noMatchesTagOk && tapSelectsOk && recentWorksOk && offlineOk;
+      record('Event Picker: "this week"/"our events"/search fixtures, no-matches tag, tap-to-select, Recent list, offline state', pass,
+        JSON.stringify({ weekEventsOk, oursEventsOk, searchOk, noMatchesTagOk, tapSelectsOk, recentWorksOk, offlineOk }));
+    } catch (err) { record('Event Picker: "this week"/"our events"/search fixtures, no-matches tag, tap-to-select, Recent list, offline state', false, err.message); }
 
     // Event Picker season cache lives in IndexedDB, not localStorage — see
     // the EVENT PICKER doc comment above allEventsCache for why (it alone
