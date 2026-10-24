@@ -59,7 +59,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    /* The title's 2s long-press opens the Lead PIN gate — none of this is
+    /* The title's 1s long-press opens the Lead PIN gate — none of this is
        text to select/copy/look-up, and a selection highlight or iOS's
        copy/lookup/magnifier popup or Android's long-press menu firing
        mid-hold would make that gesture feel broken. */
@@ -72,12 +72,12 @@
   header .htext .subtitle { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   header .hright { display: flex; align-items: center; gap: 8px; }
   /* Hold indicator: 0 width, no transition, until .growing is added on
-     pointerdown — then it animates to 100% over the same 2s as the PIN
+     pointerdown — then it animates to 100% over the same 1s as the PIN
      gate's timer. Removing .growing (early release) snaps it back to 0
      instantly, since the base rule (no .growing) carries no transition
      for the browser to apply on that change. */
   #titleHoldIndicator { height: 2px; width: 0; background: var(--yellow); margin-top: 5px; border-radius: 1px; }
-  #titleHoldIndicator.growing { width: 100%; transition: width 2s linear; }
+  #titleHoldIndicator.growing { width: 100%; transition: width 1s linear; }
   /* Team logos live on the banner card now, not the header (redesign) —
      see .team-banner below. Header keeps only the title and Me button. */
   .net-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
@@ -4559,7 +4559,7 @@ document.getElementById('pinInput').addEventListener('keydown', e => {
     holdEl.classList.remove('growing');
     void holdEl.offsetWidth;
     holdEl.classList.add('growing');
-    pressTimer = setTimeout(() => { pressTimer = null; openRoleGate(); }, 2000);
+    pressTimer = setTimeout(() => { pressTimer = null; openRoleGate(); }, 1000);
   };
   const cancel = () => {
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
