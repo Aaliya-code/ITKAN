@@ -1353,16 +1353,27 @@ function save(key, data) {
 let matches = load(LS_MATCHES, () => { _matchesLoadFailed = true; });
 let pits = load(LS_PIT, () => { _pitsLoadFailed = true; });
 
-/* ══════════ INDEXEDDB (images live here, not localStorage) ══════════ */
+/* ══════════ INDEXEDDB (images AND the event-picker season cache live
+   here, not localStorage — localStorage is small/precious and shared
+   with match/pit data, and the season cache alone can be ~400KB+). ══════════ */
 const IDB_NAME = 'biobuzz2026-images';
 const IDB_STORE = 'images';
+const IDB_EVENT_CACHE_STORE = 'event_cache';
 let _idbPromise = null;
 function openImageDB() {
   if (_idbPromise) return _idbPromise;
   _idbPromise = new Promise((resolve, reject) => {
     if (!('indexedDB' in window)) { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+    const req = indexedDB.open(IDB_NAME, 2);
+    // Guarded with contains() rather than switching on event.oldVersion, so
+    // this one handler is correct whether it's a brand-new DB (oldVersion 0,
+    // both stores missing) or an existing v1 DB upgrading (only the new
+    // store missing).
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      if (!db.objectStoreNames.contains(IDB_EVENT_CACHE_STORE)) db.createObjectStore(IDB_EVENT_CACHE_STORE);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -1409,6 +1420,34 @@ function idbGetAllKeys() {
   }));
 }
 function newImageId() { return 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9); }
+
+// Event-picker season cache: one record under a fixed key (there's only
+// ever one "current season" cache), same DB/connection as images above.
+const EVENT_CACHE_IDB_KEY = 'allEvents';
+function idbPutEventCache(value) {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_EVENT_CACHE_STORE, 'readwrite');
+    tx.objectStore(IDB_EVENT_CACHE_STORE).put(value, EVENT_CACHE_IDB_KEY);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+function idbGetEventCache() {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_EVENT_CACHE_STORE, 'readonly');
+    const req = tx.objectStore(IDB_EVENT_CACHE_STORE).get(EVENT_CACHE_IDB_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  }));
+}
+function idbClearEventCache() {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_EVENT_CACHE_STORE, 'readwrite');
+    tx.objectStore(IDB_EVENT_CACHE_STORE).clear();
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
 
 // Collision-safe entry id. crypto.randomUUID() requires a secure context,
 // which plain http (how tablets load this app from the local server) is
@@ -3731,6 +3770,7 @@ async function wipeDeviceCompletely() {
   }
   keysToRemove.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   try { await idbClearAllImages(); } catch (err) { console.error('Failed to clear image store', err); }
+  try { await idbClearEventCache(); } catch (err) { console.error('Failed to clear event cache store', err); }
 }
 document.getElementById('clearAllBtn').addEventListener('click', async () => {
   const WARNING = `This will permanently delete EVERYTHING on this device, as if the app were freshly installed:
@@ -4848,9 +4888,21 @@ const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
    Caches (each independently falls back to whatever's saved if a fetch
    fails or the device is offline — this picker must never crash or block
    on a dead network):
-     - allEventsCache: { season, fetchedAt, events } — LS_EVENT_CACHE_ALL.
+     - allEventsCache: { season, fetchedAt, events } — lives in IndexedDB
+       (IDB_EVENT_CACHE_STORE), not localStorage. The whole-season fetch
+       is the one genuinely large payload here (~400KB+ for a full FTC
+       season), and localStorage is small/precious, shared with every
+       match/pit entry a scouter ever saves — it has no business competing
+       with that for quota. idbGetEventCache()/idbPutEventCache()/
+       idbClearEventCache() (defined with the image-store helpers above)
+       read/write it; migrateEventCacheToIdb() (called once at init, right
+       after runMigration()) moves a pre-existing LS_EVENT_CACHE_ALL
+       localStorage copy from an earlier version of the app into IndexedDB
+       and deletes the localStorage key.
      - ourEventsCache: { season, teamNumber, fetchedAt, events } — keyed by
-       team number too, since ourTeamNumber can change. LS_EVENT_CACHE_OURS.
+       team number too, since ourTeamNumber can change. Small (a team
+       attends a handful of events a season), so this one stays in
+       localStorage (LS_EVENT_CACHE_OURS) same as before.
      - recentEvents: last 5 selected events (any source), LS_RECENT_EVENTS.
        Pure localStorage, no network involved, ever — always available. */
 const EVENT_LIST_FIELDS = `season code name start end location { city state country } type started ongoing finished regionCode`;
@@ -4860,12 +4912,26 @@ const ALL_EVENTS_QUERY = `query($season: Int!, $limit: Int) {
 const TEAM_EVENTS_QUERY = `query($number: Int!, $season: Int!) {
   teamByNumber(number: $number) { events(season: $season) { event { ${EVENT_LIST_FIELDS} } } }
 }`;
-const LS_EVENT_CACHE_ALL = 'biobuzz2026_eventcacheall';
+const LS_EVENT_CACHE_ALL = 'biobuzz2026_eventcacheall'; // legacy key — migrateEventCacheToIdb() moves it to IndexedDB, then deletes it
 const LS_EVENT_CACHE_OURS = 'biobuzz2026_eventcacheours';
 const LS_RECENT_EVENTS = 'biobuzz2026_recentevents';
-let allEventsCache = (() => { try { return JSON.parse(localStorage.getItem(LS_EVENT_CACHE_ALL)) || null; } catch(e) { return null; } })();
+// Populated asynchronously from IndexedDB during init (see
+// migrateEventCacheToIdb() below and its call site in INIT) rather than
+// synchronously here, since IndexedDB reads are inherently async — the
+// picker only ever reads this from a user-initiated tap (Pick Event...),
+// well after init has had time to finish, so the brief gap is harmless.
+let allEventsCache = null;
 let ourEventsCache = (() => { try { return JSON.parse(localStorage.getItem(LS_EVENT_CACHE_OURS)) || null; } catch(e) { return null; } })();
 let recentEvents = (() => { try { return JSON.parse(localStorage.getItem(LS_RECENT_EVENTS)) || []; } catch(e) { return []; } })();
+// Moves a pre-existing LS_EVENT_CACHE_ALL localStorage copy (from before
+// this cache moved to IndexedDB) into IndexedDB, then deletes the
+// localStorage key either way — safe/idempotent to call on every init.
+async function migrateEventCacheToIdb() {
+  let legacy = null;
+  try { legacy = JSON.parse(localStorage.getItem(LS_EVENT_CACHE_ALL)); } catch(e) {}
+  if (legacy) { try { await idbPutEventCache(legacy); } catch(e) {} }
+  try { localStorage.removeItem(LS_EVENT_CACHE_ALL); } catch(e) {}
+}
 let _pickerFetchError = false;
 let _pickerEventsByKey = new Map();
 function pickerEventKey(ev) { return `${ev.season}:${ev.code}`; }
@@ -4920,7 +4986,7 @@ async function refreshAllEventsCache() {
   const season = FTCSCOUT_CURRENT_SEASON;
   const data = await ftcscoutQuery(ALL_EVENTS_QUERY, { season, limit: 3000 });
   allEventsCache = { season, fetchedAt: new Date().toISOString(), events: (data && data.eventsSearch) || [] };
-  try { localStorage.setItem(LS_EVENT_CACHE_ALL, JSON.stringify(allEventsCache)); } catch(e) {}
+  try { await idbPutEventCache(allEventsCache); } catch(e) {}
 }
 async function refreshOurEventsCache() {
   const season = FTCSCOUT_CURRENT_SEASON;
@@ -6303,7 +6369,7 @@ async function runSelfTests() {
     ourEventsCache: JSON.parse(JSON.stringify(ourEventsCache)),
     recentEvents: JSON.parse(JSON.stringify(recentEvents)),
     pickerFetchError: _pickerFetchError,
-    lsEventCacheAll: (() => { try { return localStorage.getItem(LS_EVENT_CACHE_ALL); } catch(e) { return null; } })(),
+    idbEventCache: await idbGetEventCache().catch(() => null),
     lsEventCacheOurs: (() => { try { return localStorage.getItem(LS_EVENT_CACHE_OURS); } catch(e) { return null; } })(),
     lsRecentEvents: (() => { try { return localStorage.getItem(LS_RECENT_EVENTS); } catch(e) { return null; } })(),
     eventPickerDisplay: document.getElementById('eventPickerOverlay').style.display,
@@ -7457,6 +7523,67 @@ async function runSelfTests() {
         JSON.stringify({ weekEventsOk, oursEventsOk, searchOk, tapSelectsOk, recentWorksOk, offlineOk }));
     } catch (err) { record('Event Picker: "this week"/"our events"/search fixtures, tap-to-select, Recent list, offline state', false, err.message); }
 
+    // Event Picker season cache lives in IndexedDB, not localStorage — see
+    // the EVENT PICKER doc comment above allEventsCache for why (it alone
+    // can be ~400KB+, and localStorage is small/shared with every
+    // match/pit entry). Checks: after loading a realistically-sized
+    // season, localStorage holds no LS_EVENT_CACHE_ALL key and total app
+    // localStorage usage stays well under 200KB with 0 matches; the cache
+    // actually round-trips through IndexedDB; and migrateEventCacheToIdb()
+    // moves a pre-existing localStorage copy (from an older app version)
+    // into IndexedDB and deletes the localStorage key.
+    try {
+      const savedMatches = matches, savedPits = pits, savedAllCache = allEventsCache;
+      const origFetch = window.fetch;
+      let noLsKeyOk, totalBytesOk, idbRoundTripOk, migrationOk, totalBytes;
+      try {
+        matches = []; pits = [];
+        save(LS_MATCHES, matches); save(LS_PIT, pits);
+
+        // A realistically-sized whole-season fetch — real FTC seasons run
+        // ~1700 events; 500 is enough to be well past what used to make
+        // localStorage uncomfortably large, without the test itself being slow.
+        const bigFixture = Array.from({ length: 500 }, (_, i) => ({
+          season: FTCSCOUT_CURRENT_SEASON, code: `FIXEV${i}`, name: `Fixture Event ${i} Qualifier`,
+          start: '2026-11-01', end: '2026-11-02', location: { city: 'Testville', state: 'TS', country: 'USA' },
+          type: 'Qualifier', regionCode: 'USXX', started: false, ongoing: false, finished: false,
+        }));
+        window.fetch = async () => ({ ok: true, json: async () => ({ data: { eventsSearch: bigFixture } }) });
+        await refreshAllEventsCache();
+
+        noLsKeyOk = localStorage.getItem(LS_EVENT_CACHE_ALL) === null;
+
+        const idbCache = await idbGetEventCache();
+        idbRoundTripOk = !!idbCache && idbCache.events.length === 500;
+
+        totalBytes = 0;
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k === 'biobuzz2026' || k.startsWith('biobuzz2026_')) totalBytes += k.length + (localStorage.getItem(k) || '').length;
+        }
+        totalBytesOk = totalBytes < 200 * 1024;
+
+        // Migration: a pre-existing LS_EVENT_CACHE_ALL copy (simulating an
+        // older app version's data) gets moved into IndexedDB, and the
+        // localStorage key is gone afterward either way.
+        await idbClearEventCache();
+        const legacyPayload = { season: FTCSCOUT_CURRENT_SEASON, fetchedAt: new Date().toISOString(), events: bigFixture.slice(0, 5) };
+        localStorage.setItem(LS_EVENT_CACHE_ALL, JSON.stringify(legacyPayload));
+        await migrateEventCacheToIdb();
+        const migratedCache = await idbGetEventCache();
+        migrationOk = localStorage.getItem(LS_EVENT_CACHE_ALL) === null && !!migratedCache && migratedCache.events.length === 5;
+      } finally {
+        window.fetch = origFetch;
+        matches = savedMatches; pits = savedPits;
+        save(LS_MATCHES, matches); save(LS_PIT, pits);
+        allEventsCache = savedAllCache;
+        try { if (savedAllCache) await idbPutEventCache(savedAllCache); else await idbClearEventCache(); } catch(e) {}
+      }
+      const pass = noLsKeyOk && totalBytesOk && idbRoundTripOk && migrationOk;
+      record('Event Picker season cache: IndexedDB not localStorage (no LS key, <200KB total with 0 matches, IDB round-trip, legacy LS copy migrates then is removed)', pass,
+        JSON.stringify({ noLsKeyOk, totalBytesOk, idbRoundTripOk, migrationOk, totalBytes }));
+    } catch (err) { record('Event Picker season cache: IndexedDB not localStorage (no LS key, <200KB total with 0 matches, IDB round-trip, legacy LS copy migrates then is removed)', false, err.message); }
+
     // Setup QR round trip via #import= parts: schedule/team list import,
     // Who-Are-You shown, and re-importing a CHANGED setup QR replaces the
     // schedule but never touches a saved match entry.
@@ -8018,7 +8145,7 @@ async function runSelfTests() {
     ourEventsCache = snapshot.ourEventsCache;
     recentEvents = snapshot.recentEvents;
     _pickerFetchError = snapshot.pickerFetchError;
-    try { if (snapshot.lsEventCacheAll !== null) localStorage.setItem(LS_EVENT_CACHE_ALL, snapshot.lsEventCacheAll); else localStorage.removeItem(LS_EVENT_CACHE_ALL); } catch(e) {}
+    try { if (snapshot.idbEventCache !== null) await idbPutEventCache(snapshot.idbEventCache); else await idbClearEventCache(); } catch(e) {}
     try { if (snapshot.lsEventCacheOurs !== null) localStorage.setItem(LS_EVENT_CACHE_OURS, snapshot.lsEventCacheOurs); else localStorage.removeItem(LS_EVENT_CACHE_OURS); } catch(e) {}
     try { if (snapshot.lsRecentEvents !== null) localStorage.setItem(LS_RECENT_EVENTS, snapshot.lsRecentEvents); else localStorage.removeItem(LS_RECENT_EVENTS); } catch(e) {}
     document.getElementById('eventPickerOverlay').style.display = snapshot.eventPickerDisplay;
@@ -8036,6 +8163,8 @@ async function runSelfTests() {
 (async function init() {
   await requestPersistentStorage();
   await runMigration();
+  await migrateEventCacheToIdb();
+  allEventsCache = await idbGetEventCache().catch(() => null);
   await sweepOrphanImages();
   await preloadAllImages();
   applyRoleUI();
