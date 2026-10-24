@@ -95,6 +95,14 @@
   .team-banner-logo img { width: 85%; height: auto; display: block; }
   .team-banner-x { font-size: 22px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; align-self: center; }
   .manual-entry-link { font-size: 12px; color: var(--text-dim); text-decoration: underline; }
+  /* Deliberately a small text link, not a button — low-emphasis so it's
+     never tapped by accident, with margin-top:28px on its wrapper (set
+     inline where it's used) separating it from the Send-my-data card. */
+  .danger-link { font-size: 12px; color: var(--red); text-decoration: underline; display: inline-block; padding: 10px; }
+  /* Reset confirm/blocked screen message can be a multi-line itemized
+     list (scouter self-reset) as well as a single sentence (Reset QR) —
+     \n in the string renders as real line breaks either way. */
+  #resetConfirmMessage { white-space: pre-line; }
 
   /* Hide the number-spinner arrows everywhere (still shows the numeric
      keypad on mobile via inputmode="numeric") — the up/down steppers add
@@ -1143,6 +1151,9 @@
   <div class="card">
     <div class="hint" id="meUnsentHint">0 unsent entries</div>
     <button class="btn btn-primary" id="meSendQrBtn">Send my data (QR)</button>
+  </div>
+  <div style="text-align:center;margin-top:28px;">
+    <a href="#" id="meSelfResetLink" class="danger-link">Reset this device</a>
   </div>
   <div class="review-actions">
     <button class="btn btn-secondary" id="meCloseBtn">Close</button>
@@ -5282,23 +5293,56 @@ function handleResetPayload(payload) {
 // (see showWhoAreYouScreen()) — not because either has a text input of
 // its own right now, but so a live camera stream is never left sitting
 // under ANY overlay reached this way.
-function showResetConfirmScreen(id) {
+// message/retryHint are optional overrides — the scouter self-reset link
+// (Me sheet) reuses this exact same overlay/flow with its own itemized
+// message instead of the Reset QR's "The lead wants to..." wording.
+function showResetConfirmScreen(id, message) {
   stopQrScanner();
   pendingResetId = id;
-  document.getElementById('resetConfirmMessage').textContent = 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
+  document.getElementById('resetConfirmMessage').textContent = message || 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
   document.getElementById('resetBlockedCard').style.display = 'none';
   document.getElementById('resetConfirmActions').style.display = 'flex';
   document.getElementById('resetConfirmOverlay').style.display = 'block';
 }
-function showResetBlockedScreen(id, unsentCount) {
+function showResetBlockedScreen(id, unsentCount, message, retryHint) {
   stopQrScanner();
   pendingResetId = id;
-  document.getElementById('resetConfirmMessage').textContent = 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
-  document.getElementById('resetBlockedHint').textContent = `You have ${unsentCount} unsent ${unsentCount === 1 ? 'entry' : 'entries'} — send them to the lead first, then scan the Reset QR again.`;
+  document.getElementById('resetConfirmMessage').textContent = message || 'The lead wants to reset this device. This deletes ALL scouting data on this device.';
+  document.getElementById('resetBlockedHint').textContent = `You have ${unsentCount} unsent ${unsentCount === 1 ? 'entry' : 'entries'} — send them to the lead first, ${retryHint || 'then scan the Reset QR again'}.`;
   document.getElementById('resetBlockedCard').style.display = '';
   document.getElementById('resetConfirmActions').style.display = 'none';
   document.getElementById('resetConfirmOverlay').style.display = 'block';
 }
+
+// Scouter self-reset (Me sheet "Reset this device" link) — same
+// unsent-entries protection and the same confirm-overlay/DELETE-typing/
+// wipeDeviceCompletely() flow as the lead's Reset QR, just triggered
+// locally instead of by scanning a code (so no id/expiry/already-used
+// tracking applies here — showResetConfirmScreen/showResetBlockedScreen
+// just get a null id, which nothing downstream reads meaningfully).
+const SELF_RESET_MESSAGE = `This will permanently delete EVERYTHING on this device, as if the app were freshly installed:
+
+• Every match and pit entry, plus their photos and auto-path drawings
+• The imported schedule and event data (team list, FTCScout rank/RP/OPR cache, selected event)
+• Your name, station, team #, and alliance size
+• Any in-progress (unsaved) match or pit draft
+• Sent/unsent flags and backup reminders
+• Data page filters and sort preferences
+
+This cannot be undone.`;
+function startSelfReset() {
+  document.getElementById('meSheet').style.display = 'none';
+  const unsentCount = matches.filter(m => !m.sent).length + pits.filter(p => !p.sent).length;
+  if (unsentCount > 0) {
+    showResetBlockedScreen(null, unsentCount, SELF_RESET_MESSAGE, 'then try again');
+  } else {
+    showResetConfirmScreen(null, SELF_RESET_MESSAGE);
+  }
+}
+document.getElementById('meSelfResetLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  startSelfReset();
+});
 document.getElementById('resetConfirmCancelBtn').addEventListener('click', () => {
   document.getElementById('resetConfirmOverlay').style.display = 'none';
   pendingResetId = null;
@@ -7437,6 +7481,54 @@ async function runSelfTests() {
       pits = savedPits; eventData = savedEventData; pitDraft = savedPitDraft; pitHideDone = savedHideDone; pitPickerExpanded = savedExpanded;
       renderPitTeamSuggestions();
     } catch (err) { record('Pit team picker: lists ALL fixture teams (no 12 cap), correct done counter/marking, filters by number and by name, Hide done toggle actually hides them', false, err.message); }
+
+    // Scouter self-reset (Me sheet link): routes to the blocked screen
+    // with unsent entries, the confirm screen (with the self-reset's own
+    // itemized message, not the Reset QR's "lead wants to..." one) with
+    // 0 unsent, and closes the Me sheet either way. The actual wipe
+    // reuses the already-tested wipeDeviceCompletely() via the shared
+    // resetConfirmGoBtn handler — exercised for real end to end by the
+    // E2E suite instead, same split as the Reset QR tests above.
+    try {
+      const savedMatches = matches, savedPits = pits;
+      document.getElementById('meSheet').style.display = 'block';
+
+      matches = [{ id: 'ct_sr_m1', matchNumber: '1', teamNumber: '1', alliance: 'red', schemaVersion: 7, sent: false }];
+      pits = [];
+      startSelfReset();
+      const blockedState = {
+        meSheetHidden: document.getElementById('meSheet').style.display === 'none',
+        overlayVisible: document.getElementById('resetConfirmOverlay').style.display !== 'none',
+        blockedVisible: document.getElementById('resetBlockedCard').style.display !== 'none',
+        actionsHidden: document.getElementById('resetConfirmActions').style.display === 'none',
+        hintText: document.getElementById('resetBlockedHint').textContent,
+        message: document.getElementById('resetConfirmMessage').textContent,
+      };
+      const blockedCorrect = blockedState.meSheetHidden && blockedState.overlayVisible && blockedState.blockedVisible &&
+        blockedState.actionsHidden && /1 unsent entry/.test(blockedState.hintText) && blockedState.message === SELF_RESET_MESSAGE;
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+
+      document.getElementById('meSheet').style.display = 'block';
+      matches = [{ id: 'ct_sr_m2', matchNumber: '1', teamNumber: '1', alliance: 'red', schemaVersion: 7, sent: true }];
+      startSelfReset();
+      const confirmState = {
+        meSheetHidden: document.getElementById('meSheet').style.display === 'none',
+        overlayVisible: document.getElementById('resetConfirmOverlay').style.display !== 'none',
+        blockedHidden: document.getElementById('resetBlockedCard').style.display === 'none',
+        actionsVisible: document.getElementById('resetConfirmActions').style.display !== 'none',
+        message: document.getElementById('resetConfirmMessage').textContent,
+      };
+      const confirmCorrect = confirmState.meSheetHidden && confirmState.overlayVisible && confirmState.blockedHidden &&
+        confirmState.actionsVisible && confirmState.message === SELF_RESET_MESSAGE;
+      document.getElementById('resetConfirmOverlay').style.display = 'none';
+
+      const pass = blockedCorrect && confirmCorrect;
+      record('Scouter self-reset: blocked screen with unsent entries, confirm screen (own itemized message) with 0 unsent, Me sheet closes either way', pass,
+        JSON.stringify({ blockedState, blockedCorrect, confirmState, confirmCorrect }));
+
+      matches = savedMatches; pits = savedPits;
+      document.getElementById('meSheet').style.display = 'none';
+    } catch (err) { record('Scouter self-reset: blocked screen with unsent entries, confirm screen (own itemized message) with 0 unsent, Me sheet closes either way', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
