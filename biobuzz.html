@@ -59,12 +59,25 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* The title's 2s long-press opens the Lead PIN gate — none of this is
+       text to select/copy/look-up, and a selection highlight or iOS's
+       copy/lookup/magnifier popup or Android's long-press menu firing
+       mid-hold would make that gesture feel broken. */
+    user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
   }
   header .htext .htitle-row { display: flex; align-items: center; gap: 7px; }
   header .htext h1 { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
   header .htext h1 span { color: var(--yellow); }
   header .htext .subtitle { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   header .hright { display: flex; align-items: center; gap: 8px; }
+  /* Hold indicator: 0 width, no transition, until .growing is added on
+     pointerdown — then it animates to 100% over the same 2s as the PIN
+     gate's timer. Removing .growing (early release) snaps it back to 0
+     instantly, since the base rule (no .growing) carries no transition
+     for the browser to apply on that change. */
+  #titleHoldIndicator { height: 2px; width: 0; background: var(--yellow); margin-top: 5px; border-radius: 1px; }
+  #titleHoldIndicator.growing { width: 100%; transition: width 2s linear; }
   /* Team logos live on the banner card now, not the header (redesign) —
      see .team-banner below. Header keeps only the title and Me button. */
   .net-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
@@ -547,6 +560,7 @@
       <div id="netDotLead" class="net-dot" style="display:none;"></div>
     </div>
     <div class="subtitle">BIOBUZZ 2026</div>
+    <div id="titleHoldIndicator"></div>
   </div>
   <div class="hright">
     <button class="btn btn-secondary" id="meBtn" style="padding:6px 10px;display:none;position:relative;">
@@ -4537,12 +4551,27 @@ document.getElementById('pinInput').addEventListener('keydown', e => {
 (() => {
   let pressTimer = null;
   const titleEl = document.getElementById('headerTitle');
-  const start = () => { pressTimer = setTimeout(() => { pressTimer = null; openRoleGate(); }, 2000); };
-  const cancel = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  const holdEl = document.getElementById('titleHoldIndicator');
+  const start = () => {
+    // Force a reflow before re-adding .growing so a second hold (after an
+    // early release reset it to 0) re-triggers the width transition
+    // instead of the browser coalescing it with the just-removed class.
+    holdEl.classList.remove('growing');
+    void holdEl.offsetWidth;
+    holdEl.classList.add('growing');
+    pressTimer = setTimeout(() => { pressTimer = null; openRoleGate(); }, 2000);
+  };
+  const cancel = () => {
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    holdEl.classList.remove('growing'); // snaps to width:0 instantly — no transition on the base rule
+  };
   titleEl.addEventListener('pointerdown', start);
   titleEl.addEventListener('pointerup', cancel);
   titleEl.addEventListener('pointerleave', cancel);
   titleEl.addEventListener('pointercancel', cancel);
+  // Android's long-press-to-open-context-menu would otherwise fire
+  // mid-hold and interrupt the gesture.
+  titleEl.addEventListener('contextmenu', e => e.preventDefault());
 })();
 
 /* ══════════ ME SHEET (Scouter mode) ══════════ */
@@ -7529,6 +7558,35 @@ async function runSelfTests() {
       matches = savedMatches; pits = savedPits;
       document.getElementById('meSheet').style.display = 'none';
     } catch (err) { record('Scouter self-reset: blocked screen with unsent entries, confirm screen (own itemized message) with 0 unsent, Me sheet closes either way', false, err.message); }
+
+    // Title long-press: no text selection on the header (but still
+    // selectable elsewhere), and the hold indicator's .growing class
+    // toggles on pointerdown/pointerup — the actual "no selection on a
+    // real touch long-press" and "PIN prompt still opens at 2s" behavior
+    // needs real touch emulation (WebKit iPad / Chromium Android), so
+    // that's covered by tests/e2e-ipad-keyboard.mjs instead; this just
+    // checks what's verifiable from plain computed styles/class toggles.
+    try {
+      const headerEl = document.querySelector('header');
+      const notesEl = document.getElementById('f-notes');
+      const titleEl = document.getElementById('headerTitle');
+      const holdEl = document.getElementById('titleHoldIndicator');
+
+      const headerUserSelect = getComputedStyle(headerEl).userSelect;
+      const notesUserSelect = getComputedStyle(notesEl).userSelect;
+      const noSelectOnHeader = headerUserSelect === 'none';
+      const selectableElsewhere = notesUserSelect !== 'none';
+
+      const widthBefore = holdEl.getBoundingClientRect().width;
+      titleEl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      const growingAfterDown = holdEl.classList.contains('growing');
+      titleEl.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); // clears the timer before its 2s fires
+      const growingAfterUp = holdEl.classList.contains('growing');
+
+      const pass = noSelectOnHeader && selectableElsewhere && widthBefore === 0 && growingAfterDown && !growingAfterUp;
+      record('Title long-press: header has user-select:none (notes/inputs unaffected), hold indicator toggles .growing on pointerdown/pointerup', pass,
+        JSON.stringify({ headerUserSelect, notesUserSelect, noSelectOnHeader, selectableElsewhere, widthBefore, growingAfterDown, growingAfterUp }));
+    } catch (err) { record('Title long-press: header has user-select:none (notes/inputs unaffected), hold indicator toggles .growing on pointerdown/pointerup', false, err.message); }
 
   } finally {
     // Restore real state exactly as it was before any test ran.
