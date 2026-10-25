@@ -567,8 +567,16 @@
        shrinks their MINIMUM width to the longest WORD instead of the
        longest full label, which is what was actually capping how many
        data columns fit on a phone — their data cells are only ever a
-       couple characters wide. */
-    table.sticky-col th:not(:first-child) { white-space: normal; font-size: 10px; max-width: 54px; }
+       couple characters wide. overflow:hidden is a backstop, not the
+       main fix: word-break:break-word would "fix" an overlong word by
+       splitting it one letter per line, which is unreadable, not just
+       ugly — .official-tag below (hidden <=600px) removes the one word
+       that was actually too wide for its column ("(official)") instead. */
+    table.sticky-col th:not(:first-child) {
+      white-space: normal; font-size: 10px; max-width: 54px;
+      overflow: hidden; line-height: 1.25;
+    }
+    table.sticky-col .official-tag { display: none; }
     .team-cell {
       display: flex; flex-direction: column; line-height: 1.3;
       /* minus the td's own horizontal padding (4px * 2) so the CELL's
@@ -3186,9 +3194,9 @@ function colAlignClass(key) {
 }
 const AVG_COLUMNS = [
   { key: 'team',              label: 'Team',      fmt: r => teamCellHtml(r.team, teamNameFor(r.team)) },
-  { key: 'offRank',           label: 'Rank (official)', fmt: r => { const v = getOfficialStats(r.team).rank; return v === null ? '—' : v; }, val: r => { const v = getOfficialStats(r.team).rank; return v === null ? 9999 : -v; } },
-  { key: 'offRp',             label: 'RP (official)',   fmt: r => { const v = getOfficialStats(r.team).rp; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).rp; return v === null ? -1 : v; } },
-  { key: 'offOpr',            label: 'OPR (official)',  fmt: r => { const v = getOfficialStats(r.team).opr; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).opr; return v === null ? -1 : v; } },
+  { key: 'offRank',           label: 'Rank<span class="official-tag"> (official)</span>', fmt: r => { const v = getOfficialStats(r.team).rank; return v === null ? '—' : v; }, val: r => { const v = getOfficialStats(r.team).rank; return v === null ? 9999 : -v; } },
+  { key: 'offRp',             label: 'RP<span class="official-tag"> (official)</span>',   fmt: r => { const v = getOfficialStats(r.team).rp; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).rp; return v === null ? -1 : v; } },
+  { key: 'offOpr',            label: 'OPR<span class="official-tag"> (official)</span>',  fmt: r => { const v = getOfficialStats(r.team).opr; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).opr; return v === null ? -1 : v; } },
   { key: 'matches',           label: 'Matches',   fmt: r => r.matches },
   { key: 'avgTotal',          label: 'Avg Total', fmt: r => r.avgTotal.toFixed(1) },
   { key: 'avgAuto',           label: 'Auto',      fmt: r => r.avgAuto.toFixed(1) },
