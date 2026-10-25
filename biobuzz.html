@@ -494,6 +494,7 @@
   .review-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
   .review-row:last-child { border-bottom: none; }
   .review-row .k { color: var(--text-dim); }
+  .review-notes { font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   .review-actions {
     position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
     background: var(--surface); border-top: 1px solid var(--border); display: flex; gap: 10px; z-index: 301;
@@ -2473,6 +2474,7 @@ function renderReviewScreen() {
       <div class="card-title">Estimated Points</div>
       ${estBreakdownHtml(est)}
     </div>
+    ${draft.notes && draft.notes.trim() ? `<div class="card"><div class="card-title">Notes</div><div class="review-notes">${esc(draft.notes)}</div></div>` : ''}
     ${warningsHtml ? `<div class="card">${warningsHtml}</div>` : ''}
   `;
 }
@@ -7836,6 +7838,27 @@ async function runSelfTests() {
       closeReviewScreen();
       draft = savedDraft;
     } catch (err) { record('Save proceeds with Broke Down on and no "when" field', false, err.message); }
+
+    // The Confirm & Save review screen must show Notes when there are any
+    // (previously missing — everything else in the draft appeared there
+    // except this field), and must not show an empty Notes card otherwise.
+    try {
+      const savedDraft = draft;
+      const savedContent = document.getElementById('reviewContent').innerHTML;
+      draft = { ...blankDraft(), matchType: 'Qualification', matchNumber: '972', teamNumber: '9721', alliance: 'red', notes: 'Fast cycles, <stalled> once in teleop & "tipped" near the end' };
+      renderReviewScreen();
+      const notesShown = document.getElementById('reviewContent').textContent.includes('Fast cycles, <stalled> once in teleop & "tipped" near the end');
+      const notesEscaped = document.getElementById('reviewContent').innerHTML.includes('&lt;stalled&gt;');
+      record('Confirm & Save screen shows Notes (escaped, not raw HTML)', notesShown && notesEscaped, { notesShown, notesEscaped });
+
+      draft = { ...blankDraft(), matchType: 'Qualification', matchNumber: '973', teamNumber: '9731', alliance: 'red', notes: '   ' };
+      renderReviewScreen();
+      const noNotesCardForBlank = !document.getElementById('reviewContent').innerHTML.includes('Notes</div>');
+      record('Confirm & Save screen has no Notes card when notes is blank/whitespace-only', noNotesCardForBlank);
+
+      document.getElementById('reviewContent').innerHTML = savedContent;
+      draft = savedDraft;
+    } catch (err) { record('Confirm & Save screen shows Notes (escaped, not raw HTML)', false, err.message); }
 
     // "04321" and "4321" group together as one team.
     try {
