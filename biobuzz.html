@@ -473,7 +473,10 @@
 
   /* ── RATINGS (driver skill / defense / handling defense, each with N/A) ── */
   .stars-row { display: flex; align-items: center; gap: 10px; }
-  .stars-row.na .stars button { opacity: .25; pointer-events: none; }
+  /* .na dims but does NOT block taps — a star must always be tappable to
+     override N/A (see the .stars-row click handlers). .locked (Defense
+     Quality while Played Defense is off) is the one real hard lock. */
+  .stars-row.na .stars button { opacity: .25; }
   .stars-row.locked { opacity: .5; pointer-events: none; }
   .na-btn {
     background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim);
@@ -1416,6 +1419,13 @@ function esc(s) {
 // Clamp a rating to 0-5 so '★'.repeat(...) can never throw (or render junk)
 // on a malformed/imported value.
 function safeRating(r) { return Math.max(0, Math.min(5, Math.round(Number(r)) || 0)); }
+// A 1-5 star rating field has three possible states: '' or null/undefined
+// (not rated yet — the default, before the scouter has touched it either
+// way), the explicit string 'na' (scouter deliberately tapped N/A), or a
+// number 1-5. Averages/CSV/review all treat '' and 'na' identically as
+// "no rating" — this is the one place that decides what counts as "has a
+// rating" so every display/stats site agrees.
+function hasRatingValue(v) { return v !== '' && v != null && v !== 'na'; }
 
 // Canonical team-number form for grouping/comparison everywhere teams are
 // matched up — "04321" and "4321" are the same team. Never used for
@@ -2125,7 +2135,7 @@ function aggAccuracy(entries, madeField, missedField) {
   return att === 0 ? null : made / att * 100;
 }
 function avgRating(entries, field) {
-  const vals = entries.map(m => m[field]).filter(v => v !== '' && v !== null && v !== undefined).map(Number);
+  const vals = entries.map(m => m[field]).filter(hasRatingValue).map(Number);
   if (!vals.length) return null;
   return vals.reduce((s, v) => s + v, 0) / vals.length;
 }
@@ -2287,17 +2297,25 @@ function applyDefenseQualityLock() {
   if (!row) return;
   const hint = document.getElementById('defenseQualityHint');
   if (!draft.defense) {
+    // '' (not 'na') — this is the system forcing "no rating" because the
+    // toggle is off, not the scouter deliberately choosing N/A. .locked
+    // alone (opacity + pointer-events:none) is the real hard lock here;
+    // .na is deliberately NOT added — it no longer blocks taps at all
+    // (see the .stars-row.na CSS), so it would do nothing but risk a
+    // stale double-dim if a real N/A tap had set it earlier. The N/A
+    // button still shows "active" purely to visually read as "no rating"
+    // while locked.
     draft.ratingDefense = '';
-    row.classList.add('na', 'locked');
+    row.classList.add('locked');
+    row.classList.remove('na');
     row.querySelector('.na-btn').classList.add('active');
     row.querySelectorAll('.stars button').forEach(b => b.classList.remove('on'));
     if (hint) hint.textContent = '(off — turn on Played Defense to rate)';
   } else {
-    // .na alone (independent of .locked) sets pointer-events:none on the
-    // stars — it has to come off too, or the row stays unclickable even
-    // once unlocked. Matches Driver Skill's default "nothing picked yet"
-    // state: no na class at all, stars dim but tappable.
-    row.classList.remove('locked', 'na');
+    // Fully release the lock: Driver Skill is never touched by this
+    // function at all (separate .stars-row, separate key) — this only
+    // ever reaches into ratingDefense's own row.
+    row.classList.remove('locked');
     row.querySelector('.na-btn').classList.remove('active');
     if (hint) hint.textContent = '';
   }
@@ -2317,12 +2335,26 @@ document.querySelectorAll('[data-stepper]').forEach(el => {
   });
 });
 
-// Three independent 1-5 ratings, each with its own N/A toggle. N/A stores
-// '' (excluded from averages); a star value stores a number 1-5.
+// Three independent 1-5 ratings, each with its own N/A toggle. A star
+// value stores a number 1-5; explicitly tapping N/A stores the string
+// 'na'; '' or null/undefined means "not rated yet" (the default, before
+// the scouter has touched the row either way) — see hasRatingValue()
+// above. Both '' and 'na' are excluded from averages/CSV/review.
+//
+// Tapping a star must ALWAYS work, even on a row currently marked N/A —
+// it overrides N/A rather than being blocked by it (that's exactly the
+// iPad bug this is fixing: restoreDraftFieldsUI() used to treat an
+// UNRATED row, value '', as N/A too, which — combined with .na setting
+// pointer-events:none — silently locked every never-touched rating after
+// any re-render). The explicit guard against .locked here is defense in
+// depth: Defense Quality's "Played Defense is off" lock (see
+// applyDefenseQualityLock()) already blocks real pointer input via CSS
+// pointer-events:none, but that doesn't stop a programmatic .click().
 document.querySelectorAll('.stars-row').forEach(row => {
   const key = row.dataset.rating;
   row.querySelectorAll('.stars button').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (row.classList.contains('locked')) return;
       draft[key] = Number(btn.dataset.star);
       row.classList.remove('na');
       row.querySelector('.na-btn').classList.remove('active');
@@ -2331,9 +2363,11 @@ document.querySelectorAll('.stars-row').forEach(row => {
     });
   });
   row.querySelector('.na-btn').addEventListener('click', () => {
-    draft[key] = '';
-    row.classList.add('na');
-    row.querySelector('.na-btn').classList.add('active');
+    if (row.classList.contains('locked')) return;
+    const turningOn = draft[key] !== 'na'; // tapping an already-active N/A toggles it back off
+    draft[key] = turningOn ? 'na' : '';
+    row.classList.toggle('na', turningOn);
+    row.querySelector('.na-btn').classList.toggle('active', turningOn);
     row.querySelectorAll('.stars button').forEach(b => b.classList.remove('on'));
     saveDraftAutosave();
   });
@@ -2408,8 +2442,8 @@ function renderReviewScreen() {
     : [...matches, tempEntry];
   const est = computeEstimate(poolMatches, tempEntry);
   const ratingsText = [
-    (draft.ratingDriver !== '' && draft.ratingDriver != null) ? `Driver ${draft.ratingDriver}★` : null,
-    (draft.ratingDefense !== '' && draft.ratingDefense != null) ? `Defense Quality ${draft.ratingDefense}★` : null,
+    hasRatingValue(draft.ratingDriver) ? `Driver ${draft.ratingDriver}★` : null,
+    hasRatingValue(draft.ratingDefense) ? `Defense Quality ${draft.ratingDefense}★` : null,
   ].filter(Boolean).join(' · ') || 'None set';
   const warningsHtml = document.getElementById('setupWarnings').innerHTML;
   document.getElementById('reviewContent').innerHTML = `
@@ -2604,10 +2638,10 @@ function restoreDraftFieldsUI() {
   document.querySelectorAll('.stars-row').forEach(row => {
     const key = row.dataset.rating;
     const val = draft[key];
-    const isNa = val === '' || val === null || val === undefined;
+    const isNa = val === 'na'; // NOT '' or null/undefined — those mean "not rated yet", a separate, non-locked state (see hasRatingValue() above)
     row.classList.toggle('na', isNa);
     row.querySelector('.na-btn').classList.toggle('active', isNa);
-    row.querySelectorAll('.stars button').forEach(b => b.classList.toggle('on', !isNa && Number(b.dataset.star) <= Number(val)));
+    row.querySelectorAll('.stars button').forEach(b => b.classList.toggle('on', hasRatingValue(val) && Number(b.dataset.star) <= Number(val)));
   });
   applyDefenseQualityLock();
   document.getElementById('f-notes').value = draft.notes || '';
@@ -3514,8 +3548,8 @@ function renderTeamDetail() {
     ${sortByMatchOrder(allEntries).map(m => {
       const est = computeEstimate(matches, m);
       const ratingsText = [
-        (m.ratingDriver !== '' && m.ratingDriver != null) ? `Driver ${m.ratingDriver}★` : null,
-        (m.ratingDefense !== '' && m.ratingDefense != null) ? `Defense Quality ${m.ratingDefense}★` : null,
+        hasRatingValue(m.ratingDriver) ? `Driver ${m.ratingDriver}★` : null,
+        hasRatingValue(m.ratingDefense) ? `Defense Quality ${m.ratingDefense}★` : null,
         m.legacyRating ? `legacy rating ${m.legacyRating}★` : null,
       ].filter(Boolean).join(' · ');
       return `
@@ -4541,7 +4575,7 @@ function renderAllianceMatchSelect() {
 
 function robotCard(m) {
   const est = computeEstimate(matches, m);
-  const driverStar = (m.ratingDriver !== '' && m.ratingDriver != null) ? ' · Driver ' + '★'.repeat(safeRating(m.ratingDriver)) : '';
+  const driverStar = hasRatingValue(m.ratingDriver) ? ' · Driver ' + '★'.repeat(safeRating(m.ratingDriver)) : '';
   return `
     <div class="mini-entry">
       <div class="mt">#${esc(m.teamNumber)}${driverStar}${m.card ? ' · ' + esc(m.card) + ' card' : ''}${m.legacy ? ' · legacy' : ''}</div>
@@ -7672,7 +7706,10 @@ async function runSelfTests() {
       draft.defense = false;
       applyDefenseQualityLock();
       const forcedNAWhenOff = draft.ratingDefense === '';
-      const lockedClassApplied = row.classList.contains('locked') && row.classList.contains('na');
+      // .na is deliberately NOT added while locked (see
+      // applyDefenseQualityLock()) — it no longer blocks taps at all, so
+      // .locked alone (pointer-events:none) is the real lock.
+      const lockedClassApplied = row.classList.contains('locked') && !row.classList.contains('na');
       const blockedWhenOff = getComputedStyle(row).pointerEvents === 'none';
       draft.defense = true;
       applyDefenseQualityLock();
@@ -7684,6 +7721,72 @@ async function runSelfTests() {
       draft = savedDraft;
       applyDefenseQualityLock();
     } catch (err) { record('Defense Quality forced to N/A+locked when off, genuinely clickable when on', false, err.message); }
+
+    // Real-iPad bug: restoreDraftFieldsUI() (run after every save's
+    // auto-fill, draft restore, and edit-entry load) used to treat an
+    // UNRATED row ('' — the normal state before the scouter has touched
+    // it) the same as an explicit N/A, which — combined with .na setting
+    // pointer-events:none — silently locked every never-touched star
+    // rating. Checks the fix end to end: '' renders as tappable-and-
+    // unrated (not N/A), N/A is a real toggle (tap again to turn off),
+    // and a star tap always overrides N/A rather than being blocked by
+    // it.
+    try {
+      const savedDraft = draft;
+      try {
+        draft = { ...blankDraft(), defense: true }; // defense:true so ratingDefense's own row isn't ALSO locked, for a clean a-star-is-always-tappable check on both rows
+        restoreDraftFieldsUI();
+        const driverRow = document.querySelector('.stars-row[data-rating="ratingDriver"]');
+        const defenseRow = document.querySelector('.stars-row[data-rating="ratingDefense"]');
+
+        // '' renders as "not rated" (tappable, no N/A active), not N/A.
+        const driverNotNaWhenBlank = !driverRow.classList.contains('na') && !driverRow.querySelector('.na-btn').classList.contains('active');
+        const driverTappableWhenBlank = getComputedStyle(driverRow).pointerEvents !== 'none' &&
+          [...driverRow.querySelectorAll('.stars button')].every(b => getComputedStyle(b).pointerEvents !== 'none');
+        const driverNoStarsOnWhenBlank = ![...driverRow.querySelectorAll('.stars button')].some(b => b.classList.contains('on'));
+
+        // A star tap works from the blank state.
+        driverRow.querySelector('.stars button[data-star="3"]').click();
+        const starTapWorked = draft.ratingDriver === 3 &&
+          [1, 2, 3].every(n => driverRow.querySelector(`[data-star="${n}"]`).classList.contains('on')) &&
+          ![4, 5].some(n => driverRow.querySelector(`[data-star="${n}"]`).classList.contains('on'));
+
+        // N/A is a real toggle: tap on, tap again to turn off.
+        driverRow.querySelector('.na-btn').click();
+        const naOnWorked = draft.ratingDriver === 'na' && driverRow.classList.contains('na') && driverRow.querySelector('.na-btn').classList.contains('active');
+        driverRow.querySelector('.na-btn').click();
+        const naOffWorked = draft.ratingDriver === '' && !driverRow.classList.contains('na') && !driverRow.querySelector('.na-btn').classList.contains('active');
+
+        // A star tap ALWAYS overrides N/A, even while it's active.
+        driverRow.querySelector('.na-btn').click(); // back on
+        driverRow.querySelector('.stars button[data-star="5"]').click();
+        const starOverridesNaWorked = draft.ratingDriver === 5 && !driverRow.classList.contains('na') &&
+          !driverRow.querySelector('.na-btn').classList.contains('active') && driverRow.querySelector('[data-star="5"]').classList.contains('on');
+
+        // Driver Skill's fix is independent of Defense Quality's row.
+        const defenseUnaffected = !defenseRow.classList.contains('na') && !defenseRow.classList.contains('locked') &&
+          getComputedStyle(defenseRow).pointerEvents !== 'none';
+
+        const pass = driverNotNaWhenBlank && driverTappableWhenBlank && driverNoStarsOnWhenBlank && starTapWorked &&
+          naOnWorked && naOffWorked && starOverridesNaWorked && defenseUnaffected;
+        record('Rating stars: blank (\'\') renders as tappable/unrated not N/A, N/A toggles on/off, a star tap always overrides N/A', pass, JSON.stringify({
+          driverNotNaWhenBlank, driverTappableWhenBlank, driverNoStarsOnWhenBlank, starTapWorked, naOnWorked, naOffWorked, starOverridesNaWorked, defenseUnaffected,
+        }));
+      } finally {
+        draft = savedDraft;
+        restoreDraftFieldsUI();
+      }
+    } catch (err) { record('Rating stars: blank (\'\') renders as tappable/unrated not N/A, N/A toggles on/off, a star tap always overrides N/A', false, err.message); }
+
+    // hasRatingValue()/avgRating(): 'na' and '' both excluded from
+    // averages (a literal 'na' string must never reach Number(), or the
+    // average silently becomes NaN).
+    try {
+      const entries = [{ ratingDriver: 4 }, { ratingDriver: 'na' }, { ratingDriver: '' }, { ratingDriver: 2 }, { ratingDriver: null }, { ratingDriver: undefined }];
+      const avg = avgRating(entries, 'ratingDriver');
+      const pass = avg === 3 && hasRatingValue(4) && hasRatingValue('2') && !hasRatingValue('na') && !hasRatingValue('') && !hasRatingValue(null) && !hasRatingValue(undefined);
+      record('avgRating()/hasRatingValue(): \'na\' and \'\' excluded (average of 4 and 2 is 3, not NaN)', pass, JSON.stringify({ avg }));
+    } catch (err) { record('avgRating()/hasRatingValue(): \'na\' and \'\' excluded (average of 4 and 2 is 3, not NaN)', false, err.message); }
 
     // Broke Down needs only the toggle — Save must not block on a "when"
     // field the form no longer has (brokeDownWhen was removed in Phase 5).
