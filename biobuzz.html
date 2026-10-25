@@ -309,6 +309,7 @@
   th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
   th { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; cursor: pointer; }
   td.num, th.num { text-align: right; }
+  td.center, th.center { text-align: center; }
 
   .sort-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
   .sort-row button {
@@ -3174,6 +3175,15 @@ function getOfficialStats(teamNumber) {
     ties: (stats && stats.ties != null) ? stats.ties : null,
   };
 }
+// Rank sits directly against RP (or, on Averages, OPR) — right-aligning it
+// like every other numeric column pushed its value flush against the next
+// column's value with barely a gap, reading as one smashed-together
+// number. Centering just Rank gives it breathing room on both sides.
+function colAlignClass(key) {
+  if (key === 'team') return '';
+  if (key === 'rank' || key === 'offRank') return 'center';
+  return 'num';
+}
 const AVG_COLUMNS = [
   { key: 'team',              label: 'Team',      fmt: r => teamCellHtml(r.team, teamNameFor(r.team)) },
   { key: 'offRank',           label: 'Rank (official)', fmt: r => { const v = getOfficialStats(r.team).rank; return v === null ? '—' : v; }, val: r => { const v = getOfficialStats(r.team).rank; return v === null ? 9999 : -v; } },
@@ -3203,8 +3213,8 @@ function renderAverages() {
   const valOf = col.val || (r => Number(r[col.key]) || 0);
   rows.sort((a, b) => (valOf(a) - valOf(b)) * avgSortDir);
   table.innerHTML = `
-    <tr>${AVG_COLUMNS.map(c => `<th data-sortkey="${c.key}">${c.label}${avgSortKey === c.key ? `<span class="arrow">${avgSortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`).join('')}</tr>
-    ${rows.map(r => `<tr>${AVG_COLUMNS.map(c => `<td${c.key === 'team' ? '' : ' class="num"'}>${c.fmt(r)}</td>`).join('')}</tr>`).join('')}
+    <tr>${AVG_COLUMNS.map(c => `<th data-sortkey="${c.key}"${colAlignClass(c.key) ? ` class="${colAlignClass(c.key)}"` : ''}>${c.label}${avgSortKey === c.key ? `<span class="arrow">${avgSortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`).join('')}</tr>
+    ${rows.map(r => `<tr>${AVG_COLUMNS.map(c => `<td${colAlignClass(c.key) ? ` class="${colAlignClass(c.key)}"` : ''}>${c.fmt(r)}</td>`).join('')}</tr>`).join('')}
   `;
   table.querySelectorAll('th[data-sortkey]').forEach(th => {
     th.addEventListener('click', () => {
@@ -3274,8 +3284,8 @@ function renderRankings() {
   const valOf = col.val || (r => Number(r[col.key]) || 0);
   rows.sort((a, b) => (valOf(a) - valOf(b)) * rankingsSortDir);
   table.innerHTML = `
-    <tr>${RANKINGS_COLUMNS.map(c => `<th data-sortkey="${c.key}">${c.label}${rankingsSortKey === c.key ? `<span class="arrow">${rankingsSortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`).join('')}</tr>
-    ${rows.map(r => `<tr data-team="${esc(r.team)}" class="rankings-row">${RANKINGS_COLUMNS.map(c => `<td${c.key === 'team' ? '' : ' class="num"'}>${c.fmt(r)}</td>`).join('')}</tr>`).join('')}
+    <tr>${RANKINGS_COLUMNS.map(c => `<th data-sortkey="${c.key}"${colAlignClass(c.key) ? ` class="${colAlignClass(c.key)}"` : ''}>${c.label}${rankingsSortKey === c.key ? `<span class="arrow">${rankingsSortDir === 1 ? '▲' : '▼'}</span>` : ''}</th>`).join('')}</tr>
+    ${rows.map(r => `<tr data-team="${esc(r.team)}" class="rankings-row">${RANKINGS_COLUMNS.map(c => `<td${colAlignClass(c.key) ? ` class="${colAlignClass(c.key)}"` : ''}>${c.fmt(r)}</td>`).join('')}</tr>`).join('')}
   `;
   table.querySelectorAll('th[data-sortkey]').forEach(th => {
     th.addEventListener('click', () => {
