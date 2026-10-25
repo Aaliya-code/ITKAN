@@ -571,9 +571,17 @@
        main fix: word-break:break-word would "fix" an overlong word by
        splitting it one letter per line, which is unreadable, not just
        ugly — .official-tag below (hidden <=600px) removes the one word
-       that was actually too wide for its column ("(official)") instead. */
+       that was actually too wide for its column ("(official)") instead.
+       max-width here must fit the single longest WORD among all header
+       labels ("Endgame"/"Matches", ~54px at this font) — and since
+       box-sizing:border-box is set globally, max-width INCLUDES the
+       cell's own padding, so it has to be that word's width PLUS the
+       8px of horizontal padding, not just the word's width alone (an
+       earlier 54px here left only 46px of actual content room, clipping
+       "Matches" to "MATCHE" mid-word with no ellipsis — looked like it
+       was overlapping the next column instead of just being cut off). */
     table.sticky-col th:not(:first-child) {
-      white-space: normal; font-size: 10px; max-width: 54px;
+      white-space: normal; font-size: 10px; max-width: 66px;
       overflow: hidden; line-height: 1.25;
     }
     table.sticky-col .official-tag { display: none; }
