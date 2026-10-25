@@ -585,6 +585,12 @@
       overflow: hidden; line-height: 1.25;
     }
     table.sticky-col .official-tag { display: none; }
+    /* "W-L-T" fits comfortably on one line at this width (~32px needed
+       vs ~58px of room) — the browser was still breaking after a hyphen
+       anyway, since white-space:normal treats "-" as a break opportunity
+       regardless of whether the full text would otherwise fit. Short
+       hyphenated labels like this one don't need to wrap at all. */
+    table.sticky-col th[data-sortkey="wlt"] { white-space: nowrap; }
     .team-cell {
       display: flex; flex-direction: column; line-height: 1.3;
       /* minus the td's own horizontal padding (4px * 2) so the CELL's
