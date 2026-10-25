@@ -541,6 +541,47 @@
     position: sticky; left: 0; background: var(--surface); z-index: 2;
     box-shadow: 2px 0 4px rgba(0,0,0,.35);
   }
+  /* Team cell: "#101 — Team Name" on one line above ~600px (today's
+     layout, unchanged) — number bold, name stacked on its own small
+     muted line and truncated under ~600px, where the sticky column would
+     otherwise grow to fit a long name and cover most of a phone's width. */
+  .team-cell-num { font-weight: 700; }
+  .team-cell-name { color: var(--text-dim); }
+  .names-mode-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
+  .names-mode-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; }
+  .names-mode-seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .names-mode-seg button {
+    padding: 8px 12px; min-height: 36px; font-size: 11px; font-weight: 600;
+    background: var(--surface2); color: var(--text-dim); border: none; cursor: pointer;
+  }
+  .names-mode-seg button.active { background: var(--yellow); color: #16181f; }
+  @media (max-width: 600px) {
+    /* The sticky column's own width comes from .team-cell's max-width
+       below, not from max-width directly on the td/th — table cells in
+       auto layout don't reliably respect max-width on themselves, but DO
+       shrink to fit a constrained block-level child. */
+    table.sticky-col th, table.sticky-col td { padding: 6px 4px; }
+    table.sticky-col td.num { font-size: 11px; }
+    /* Letting header labels wrap (e.g. "Rank (official)" -> two lines)
+       shrinks their MINIMUM width to the longest WORD instead of the
+       longest full label, which is what was actually capping how many
+       data columns fit on a phone — their data cells are only ever a
+       couple characters wide. */
+    table.sticky-col th:not(:first-child) { white-space: normal; font-size: 10px; max-width: 54px; }
+    .team-cell {
+      display: flex; flex-direction: column; line-height: 1.3;
+      /* minus the td's own horizontal padding (4px * 2) so the CELL's
+         total rendered width — content + padding — lands at 25vw, not
+         .team-cell's content box alone plus padding on top of that. */
+      max-width: calc(25vw - 8px); min-width: 0;
+    }
+    .team-cell-sep { display: none; }
+    .team-cell-name {
+      font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 100%; min-width: 0;
+    }
+    table.names-full .team-cell-name { white-space: normal; overflow: visible; text-overflow: clip; }
+  }
 
   /* ── START POSITION / LEGALITY ── */
   #set-start-btn.active { background: var(--yellow); border-color: var(--yellow); color: #16181f; }
@@ -915,6 +956,13 @@
 
     <div id="dstep-rankings" class="step">
       <div class="hint" id="rankingsStatus" style="margin-bottom:8px;"></div>
+      <div class="names-mode-row">
+        <span class="names-mode-label">Names</span>
+        <div class="names-mode-seg">
+          <button type="button" data-names-mode="short">Short</button>
+          <button type="button" data-names-mode="full">Full</button>
+        </div>
+      </div>
       <div class="card table-scroll-card">
         <table id="rankingsTable" class="sortable-table sticky-col"></table>
       </div>
@@ -925,6 +973,13 @@
     </div>
 
     <div id="dstep-averages" class="step">
+      <div class="names-mode-row">
+        <span class="names-mode-label">Names</span>
+        <div class="names-mode-seg">
+          <button type="button" data-names-mode="short">Short</button>
+          <button type="button" data-names-mode="full">Full</button>
+        </div>
+      </div>
       <div class="card table-scroll-card">
         <table id="avgTable" class="sortable-table sticky-col"></table>
       </div>
@@ -1926,6 +1981,26 @@ function fmtAcc(p) { return p === null ? '—' : p.toFixed(0) + '%'; }
 /* ══════════ PRACTICE EXCLUSION + MATCH ORDERING (task 7) ══════════ */
 const LS_INCLUDE_PRACTICE = 'biobuzz2026_includepractice';
 let includePractice = (() => { try { return localStorage.getItem(LS_INCLUDE_PRACTICE) === '1'; } catch(e) { return false; } })();
+// Rankings/Averages' Team-cell name display, remembered per device — only
+// visually matters <=600px (see .team-cell CSS), where 'short' truncates
+// with an ellipsis and 'full' wraps instead. Harmless either way >600px,
+// where today's single-line layout never truncates.
+const LS_NAMES_MODE = 'biobuzz2026_namesmode';
+let namesMode = (() => { try { return localStorage.getItem(LS_NAMES_MODE) === 'full' ? 'full' : 'short'; } catch(e) { return 'short'; } })();
+function renderNamesModeUI() {
+  document.querySelectorAll('[data-names-mode]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.namesMode === namesMode);
+  });
+  document.querySelectorAll('table.sticky-col').forEach(t => t.classList.toggle('names-full', namesMode === 'full'));
+}
+document.querySelectorAll('[data-names-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    namesMode = btn.dataset.namesMode;
+    try { localStorage.setItem(LS_NAMES_MODE, namesMode); } catch(e) {}
+    renderNamesModeUI();
+  });
+});
+renderNamesModeUI();
 // Data-view event filter: 'current' (default) scopes Averages/By Team/
 // Compatibility/Picker/Alliance to whichever event this device has
 // selected right now (eventData.eventCode, '' meaning Unassigned, same as
@@ -3075,6 +3150,18 @@ function teamAverages() {
 // Official (FTCScout) numbers, as opposed to everything else in this table
 // which is scouted. Returns null fields when Section B hasn't fetched (or
 // couldn't reach) event data for that team — callers render '—'.
+// Shared Team-cell markup for every sticky-first-column table (Rankings,
+// Averages): number bold on its own span, name on another — CSS alone
+// (not this function) decides whether that renders as today's single
+// "#101 — Name" line (>600px) or a stacked, truncated/wrapped pair
+// (<=600px, see .team-cell rules above table.sticky-col).
+function teamCellHtml(teamNumber, teamName) {
+  return `<span class="team-cell"><span class="team-cell-num">#${esc(teamNumber)}</span>${teamName ? `<span class="team-cell-sep"> — </span><span class="team-cell-name">${esc(teamName)}</span>` : ''}</span>`;
+}
+function teamNameFor(teamNumber) {
+  const t = getEventTeamList().find(x => x.n === teamNumber);
+  return t ? t.nm : '';
+}
 function getOfficialStats(teamNumber) {
   const n = normTeam(teamNumber);
   const stats = (eventData.teamStats || {})[n];
@@ -3088,7 +3175,7 @@ function getOfficialStats(teamNumber) {
   };
 }
 const AVG_COLUMNS = [
-  { key: 'team',              label: 'Team',      fmt: r => '#' + esc(r.team) },
+  { key: 'team',              label: 'Team',      fmt: r => teamCellHtml(r.team, teamNameFor(r.team)) },
   { key: 'offRank',           label: 'Rank (official)', fmt: r => { const v = getOfficialStats(r.team).rank; return v === null ? '—' : v; }, val: r => { const v = getOfficialStats(r.team).rank; return v === null ? 9999 : -v; } },
   { key: 'offRp',             label: 'RP (official)',   fmt: r => { const v = getOfficialStats(r.team).rp; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).rp; return v === null ? -1 : v; } },
   { key: 'offOpr',            label: 'OPR (official)',  fmt: r => { const v = getOfficialStats(r.team).opr; return v === null ? '—' : v.toFixed(1); }, val: r => { const v = getOfficialStats(r.team).opr; return v === null ? -1 : v; } },
@@ -3132,7 +3219,7 @@ function renderAverages() {
 // about for the current event — not just the ones we've scouted — so a
 // team nobody's scouted yet still shows up with official-only stats.
 const RANKINGS_COLUMNS = [
-  { key: 'team',    label: 'Team',     fmt: r => `#${esc(r.team)}${r.teamName ? ' — ' + esc(r.teamName) : ''}` },
+  { key: 'team',    label: 'Team',     fmt: r => teamCellHtml(r.team, r.teamName) },
   { key: 'rank',    label: 'Rank',     fmt: r => r.rank === null ? '—' : r.rank, val: r => r.rank === null ? -9999 : -r.rank },
   { key: 'rp',      label: 'RP',       fmt: r => r.rp === null ? '—' : r.rp.toFixed(1), val: r => r.rp === null ? -1 : r.rp },
   { key: 'wlt',     label: 'W-L-T',    fmt: r => r.wins === null ? '—' : `${r.wins}-${r.losses}-${r.ties}`, val: r => r.wins === null ? -1 : r.wins },
@@ -6427,6 +6514,8 @@ async function runSelfTests() {
     lastBackupAt,
     lsLastBackupAt: (() => { try { return localStorage.getItem(LS_LAST_BACKUP_AT); } catch(e) { return null; } })(),
     manualEntryRevealed,
+    namesMode,
+    lsNamesMode: (() => { try { return localStorage.getItem(LS_NAMES_MODE); } catch(e) { return null; } })(),
     allEventsCache: JSON.parse(JSON.stringify(allEventsCache)),
     ourEventsCache: JSON.parse(JSON.stringify(ourEventsCache)),
     recentEvents: JSON.parse(JSON.stringify(recentEvents)),
@@ -6701,6 +6790,48 @@ async function runSelfTests() {
       const pass = flagsHtml.includes('Set your team') && !flagsHtml.includes('SWARM RP');
       record('RP projection shows fallback when our team # is unset', pass);
     } catch (err) { record('RP projection shows fallback when our team # is unset', false, err.message); }
+
+    // Sticky Team column (Rankings + Averages): teamCellHtml()/
+    // teamNameFor() produce the right markup, and the Names Short/Full
+    // toggle updates both tables' state and persists per device. The
+    // actual point of this round's fix — rendered column width/visible
+    // column count on a real narrow viewport — needs a real viewport to
+    // measure, so that lives in the E2E suite's "Sticky Team column" step
+    // instead (tests/e2e-event-day.mjs).
+    try {
+      const savedEventData = JSON.parse(JSON.stringify(eventData)), savedMatches = matches, savedNamesMode = namesMode;
+      const origLsNamesMode = (() => { try { return localStorage.getItem(LS_NAMES_MODE); } catch(e) { return null; } })();
+      let markupOk, nameLookupOk, defaultModeOk, toggleOk;
+      try {
+        eventData.teams = [{ number: '19201', name: 'Very Long Robotics Team Name Co' }];
+        const html = teamCellHtml('19201', 'Very Long Robotics Team Name Co');
+        markupOk = html.includes('team-cell-num">#19201<') && html.includes('team-cell-name">Very Long Robotics Team Name Co<');
+        nameLookupOk = teamNameFor('19201') === 'Very Long Robotics Team Name Co' && teamNameFor('99999') === '';
+
+        try { localStorage.removeItem(LS_NAMES_MODE); } catch(e) {}
+        namesMode = localStorage.getItem(LS_NAMES_MODE) === 'full' ? 'full' : 'short';
+        defaultModeOk = namesMode === 'short';
+
+        document.querySelector('[data-names-mode="full"]').click();
+        const lsAfterFull = (() => { try { return localStorage.getItem(LS_NAMES_MODE); } catch(e) { return null; } })();
+        const fullBtnActive = document.querySelector('[data-names-mode="full"]').classList.contains('active');
+        const shortBtnInactive = !document.querySelector('[data-names-mode="short"]').classList.contains('active');
+        const rankingsHasFullClass = document.getElementById('rankingsTable').classList.contains('names-full');
+        const avgHasFullClass = document.getElementById('avgTable').classList.contains('names-full');
+        document.querySelector('[data-names-mode="short"]').click();
+        const rankingsLosesFullClass = !document.getElementById('rankingsTable').classList.contains('names-full');
+        const avgLosesFullClass = !document.getElementById('avgTable').classList.contains('names-full');
+        toggleOk = lsAfterFull === 'full' && fullBtnActive && shortBtnInactive && rankingsHasFullClass && avgHasFullClass &&
+          rankingsLosesFullClass && avgLosesFullClass && namesMode === 'short';
+      } finally {
+        eventData = savedEventData; matches = savedMatches; namesMode = savedNamesMode;
+        try { if (origLsNamesMode !== null) localStorage.setItem(LS_NAMES_MODE, origLsNamesMode); else localStorage.removeItem(LS_NAMES_MODE); } catch(e) {}
+        renderNamesModeUI();
+      }
+      const pass = markupOk && nameLookupOk && defaultModeOk && toggleOk;
+      record('Sticky Team column: teamCellHtml()/teamNameFor() markup, Names Short/Full toggle updates both tables + persists, default is Short', pass,
+        JSON.stringify({ markupOk, nameLookupOk, defaultModeOk, toggleOk }));
+    } catch (err) { record('Sticky Team column: teamCellHtml()/teamNameFor() markup, Names Short/Full toggle updates both tables + persists, default is Short', false, err.message); }
 
     /* ── Phase 3 tests ── */
 
@@ -8279,6 +8410,9 @@ async function runSelfTests() {
     lastBackupAt = snapshot.lastBackupAt;
     try { if (snapshot.lsLastBackupAt !== null) localStorage.setItem(LS_LAST_BACKUP_AT, snapshot.lsLastBackupAt); else localStorage.removeItem(LS_LAST_BACKUP_AT); } catch(e) {}
     manualEntryRevealed = snapshot.manualEntryRevealed;
+    namesMode = snapshot.namesMode;
+    try { if (snapshot.lsNamesMode !== null) localStorage.setItem(LS_NAMES_MODE, snapshot.lsNamesMode); else localStorage.removeItem(LS_NAMES_MODE); } catch(e) {}
+    renderNamesModeUI();
     allEventsCache = snapshot.allEventsCache;
     ourEventsCache = snapshot.ourEventsCache;
     recentEvents = snapshot.recentEvents;
