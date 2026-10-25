@@ -2574,15 +2574,30 @@ const DRAFT_INK_ID = '__draft_ink__';
 let _draftSaveTimer = null;
 function saveDraftAutosave() {
   clearTimeout(_draftSaveTimer);
-  _draftSaveTimer = setTimeout(async () => {
-    try {
-      const snapshot = { ...draft, _savedAt: Date.now() };
-      localStorage.setItem(LS_DRAFT, JSON.stringify(snapshot));
-    } catch (err) {
-      console.error('Draft autosave failed', err);
-    }
-  }, 150);
+  _draftSaveTimer = setTimeout(flushDraftAutosave, 150);
 }
+// The 150ms debounce above coalesces rapid-fire changes (stepper taps,
+// typing) into one write; it only waits for a pause, it never just drops a
+// write. But if the app gets backgrounded/closed WHILE a write is still
+// pending — e.g. mid-match, tapping Auto/Teleop counters quickly — the
+// setTimeout never fires and that pending data (and everything since the
+// last successful debounced write: the start square, every stepper count)
+// is lost on the next load, even though a mid-stroke's ink PNG survives
+// (saveInkAutosave writes to IndexedDB immediately, not debounced). Flush
+// synchronously the instant the page is hidden/closed so nothing is ever
+// mid-flight when that happens.
+function flushDraftAutosave() {
+  clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = null;
+  try {
+    const snapshot = { ...draft, _savedAt: Date.now() };
+    localStorage.setItem(LS_DRAFT, JSON.stringify(snapshot));
+  } catch (err) {
+    console.error('Draft autosave failed', err);
+  }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushDraftAutosave(); });
+window.addEventListener('pagehide', flushDraftAutosave);
 function clearDraftAutosave() {
   try { localStorage.removeItem(LS_DRAFT); } catch (e) {}
   idbDeleteImage(DRAFT_INK_ID).catch(() => {});
@@ -2690,6 +2705,7 @@ async function applyDraftSnapshot(snap) {
 }
 
 window.addEventListener('beforeunload', (e) => {
+  flushDraftAutosave();
   if (draftHasData(draft) || pitDraftHasData(pitDraft) || _inkTouched) {
     e.preventDefault();
     e.returnValue = '';
@@ -7787,6 +7803,26 @@ async function runSelfTests() {
       const pass = avg === 3 && hasRatingValue(4) && hasRatingValue('2') && !hasRatingValue('na') && !hasRatingValue('') && !hasRatingValue(null) && !hasRatingValue(undefined);
       record('avgRating()/hasRatingValue(): \'na\' and \'\' excluded (average of 4 and 2 is 3, not NaN)', pass, JSON.stringify({ avg }));
     } catch (err) { record('avgRating()/hasRatingValue(): \'na\' and \'\' excluded (average of 4 and 2 is 3, not NaN)', false, err.message); }
+
+    // Draft autosave's write is normally debounced 150ms; flushDraftAutosave()
+    // is the function visibilitychange/pagehide call so a backgrounded/closed
+    // app never loses a pending write stuck mid-debounce.
+    try {
+      const savedDraft = draft;
+      const savedRaw = localStorage.getItem(LS_DRAFT);
+      localStorage.removeItem(LS_DRAFT);
+      draft = { ...blankDraft(), matchType: 'Qualification', matchNumber: '971', teamNumber: '9711', autoHiveMade: 3, startX: 10, startY: 20, startTile: 'X1' };
+      saveDraftAutosave(); // starts the 150ms debounce; must NOT have written yet
+      const notYetWritten = localStorage.getItem(LS_DRAFT) === null;
+      flushDraftAutosave(); // what visibilitychange/pagehide call
+      const written = JSON.parse(localStorage.getItem(LS_DRAFT) || 'null');
+      const timerCleared = _draftSaveTimer === null;
+      const pass = notYetWritten && !!written && written.autoHiveMade === 3 && written.startX === 10 && written.startTile === 'X1' && timerCleared;
+      record('Draft autosave: flushDraftAutosave() (visibilitychange/pagehide) writes immediately, not stuck in the 150ms debounce', pass,
+        { notYetWritten, written, timerCleared });
+      if (savedRaw === null) localStorage.removeItem(LS_DRAFT); else localStorage.setItem(LS_DRAFT, savedRaw);
+      draft = savedDraft;
+    } catch (err) { record('Draft autosave: flushDraftAutosave() (visibilitychange/pagehide) writes immediately, not stuck in the 150ms debounce', false, err.message); }
 
     // Broke Down needs only the toggle — Save must not block on a "when"
     // field the form no longer has (brokeDownWhen was removed in Phase 5).
