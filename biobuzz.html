@@ -397,6 +397,17 @@
   .path-canvas-wrap { position: relative; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
   #auto-path-bg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: auto; display: block; pointer-events: none; }
   #auto-path-canvas { position: relative; width: 100%; height: auto; display: block; touch-action: none; cursor: crosshair; background: transparent; }
+  /* Pit routine canvases: same layered field-art/ink pair as match Auto
+     Path, same shared .path-canvas-wrap sizing rule, just reusable per
+     routine index (there can be up to 4 on screen at once) via a class
+     instead of a fixed id. */
+  .routine-bg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: auto; display: block; pointer-events: none; }
+  .routine-ink-canvas { position: relative; width: 100%; height: auto; display: block; touch-action: none; cursor: crosshair; background: transparent; }
+  /* Read-only routine-drawing thumbnails in By Team / Compatibility —
+     small, since they're a summary next to text, not an editing surface. */
+  .routine-display-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .routine-display-canvas-wrap { flex: none; width: 64px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .routine-display-canvas-wrap canvas { width: 100%; height: auto; display: block; }
 
   /* ── SEGMENTED CONTROL (match type, flower owner/bottom-nectar) ── */
   .seg-row { display: flex; gap: 6px; }
@@ -1817,11 +1828,26 @@ function migratePitEntryV4(p) {
   p.schemaVersion = 4;
   return true;
 }
+// v4 -> v5: routine drawing. An existing tap-placed start (startX/startY/
+// startTile) is ALREADY the routine's full-field start marker — it was
+// drawn there before this migration too (see drawRoutineCanvas's
+// predecessor) — so nothing about it needs to change or be transformed;
+// the only gap is routines saved before a `strokes` array existed at all.
+// No data loss: every old field carries forward completely unchanged.
+function migratePitEntryV5(p) {
+  if (p.schemaVersion >= 5) return false;
+  if (Array.isArray(p.routines)) {
+    p.routines.forEach(r => { if (!Array.isArray(r.strokes)) r.strokes = []; });
+  }
+  p.schemaVersion = 5;
+  return true;
+}
 async function migratePitEntryFull(p) {
   let changed = false;
   if (await migratePitEntry(p)) changed = true;
   if (migratePitEntryV3(p)) changed = true;
   if (migratePitEntryV4(p)) changed = true;
+  if (migratePitEntryV5(p)) changed = true;
   return changed;
 }
 async function runMigration() {
@@ -2402,7 +2428,7 @@ function resetScoutForm() {
   document.getElementById('f-notes').value = '';
   renderAllianceTipsVisibility();
   clearStartPosition();
-  _settingStart = false;
+  if (matchSurface) matchSurface.settingStart = false;
   const setStartBtn = document.getElementById('set-start-btn');
   if (setStartBtn) setStartBtn.classList.remove('active');
   clearAutoPath();
@@ -2497,14 +2523,10 @@ function startEditMatch(id) {
   restoreDraftFieldsUI();
   // Reconstruct ink from the stored vector strokes (Phase 3) rather than
   // the saved bg+ink composite JPEG, which can't be cleanly un-merged.
-  if (_pCtx) {
-    _pCtx.clearRect(0, 0, PATH_W, PATH_H);
-    replayStrokes(_pCtx, draft.autoPathStrokes || []);
-  }
+  if (matchSurface) matchSurface.replayAll();
   // Same reasoning as applyDraftSnapshot: the loaded ink didn't come from
   // anything in the undo stack, so Undo must not be able to jump to it.
-  _pUndo = [];
-  _strokeUndo = [];
+  if (matchSurface) { matchSurface.pUndo = []; matchSurface.strokeUndo = []; }
   document.getElementById('editingBarLabel').textContent = `Editing ${matchLabelOf(draft)} / #${draft.teamNumber}`;
   document.getElementById('editingBar').style.display = 'flex';
   document.querySelector('nav button[data-page="scout"]').click();
@@ -2710,27 +2732,28 @@ function restoreDraftFieldsUI() {
 async function applyDraftSnapshot(snap) {
   draft = { ...blankDraft(), ...snap };
   delete draft._savedAt;
-  restoreDraftFieldsUI(); // also redraws the start square (on _bgCtx, a separate canvas from the ink restore below)
-  if (_pCtx) {
-    _pCtx.clearRect(0, 0, PATH_W, PATH_H);
+  restoreDraftFieldsUI(); // also redraws the start square (on matchSurface.bgCtx, a separate canvas from the ink restore below)
+  if (matchSurface && matchSurface.pCtx) {
+    matchSurface.pCtx.clearRect(0, 0, PATH_W, PATH_H);
     if (Array.isArray(draft.autoPathStrokes) && draft.autoPathStrokes.length) {
       // Same path as startEditMatch(): replay the vector strokes in LOGICAL
-      // field-inch units, which draw correctly through _pCtx's DPR
+      // field-inch units, which draw correctly through the canvas's own DPR
       // transform regardless of devicePixelRatio.
-      replayStrokes(_pCtx, draft.autoPathStrokes);
+      replayStrokes(matchSurface.pCtx, draft.autoPathStrokes);
     } else {
       // Fallback for a draft saved before vector strokes existed. The saved
       // PNG's natural pixel size is the DPR-scaled backing buffer it was
-      // captured from — _pCtx already has the DPR transform active, so
-      // drawImage(img, 0, 0) (natural size) would scale it a second time.
-      // Explicit PATH_W/PATH_H destination size draws it at its true
-      // logical size instead, same fix as captureAutoPathImage's compositing.
+      // captured from — the canvas's context already has the DPR transform
+      // active, so drawImage(img, 0, 0) (natural size) would scale it a
+      // second time. Explicit PATH_W/PATH_H destination size draws it at
+      // its true logical size instead, same fix as captureAutoPathImage's
+      // compositing.
       try {
         const inkUrl = await idbGetImage(DRAFT_INK_ID);
         if (inkUrl) {
           await new Promise((resolve) => {
             const img = new Image();
-            img.onload = () => { _pCtx.drawImage(img, 0, 0, PATH_W, PATH_H); resolve(); };
+            img.onload = () => { matchSurface.pCtx.drawImage(img, 0, 0, PATH_W, PATH_H); resolve(); };
             img.onerror = () => resolve();
             img.src = inkUrl;
           });
@@ -2741,13 +2764,12 @@ async function applyDraftSnapshot(snap) {
   // A restored draft's ink didn't come from anything in the undo stack —
   // leaving stale entries there would let Undo jump to an unrelated (and
   // possibly wrong-size, if DPR differs) prior snapshot.
-  _pUndo = [];
-  _strokeUndo = [];
+  if (matchSurface) { matchSurface.pUndo = []; matchSurface.strokeUndo = []; }
 }
 
 window.addEventListener('beforeunload', (e) => {
   flushDraftAutosave();
-  if (draftHasData(draft) || pitDraftHasData(pitDraft) || _inkTouched) {
+  if (draftHasData(draft) || pitDraftHasData(pitDraft) || (matchSurface && matchSurface.inkTouched)) {
     e.preventDefault();
     e.returnValue = '';
   }
@@ -2829,26 +2851,51 @@ document.getElementById('pitDupAddBtn').addEventListener('click', () => {
    Set Start — the alliance half is inferred from which side of the field
    was tapped, since a pit-claimed routine isn't tied to one match). ── */
 function inferAllianceFromX(x) { return x < FIELD_CONFIG.center ? 'red' : 'blue'; }
-function blankRoutine() { return { name: '', startX: null, startY: null, startTile: '', description: '', claimedPoints: 0, reliability: '' }; }
+function blankRoutine() { return { name: '', startX: null, startY: null, startTile: '', description: '', claimedPoints: 0, reliability: '', strokes: [] }; }
+// Lower than match Auto Path's 400-point default (enforceStrokeCap's
+// default, see createDrawSurface): a pit entry can carry up to 4 routines'
+// worth of strokes in one QR payload, so each routine gets a smaller
+// budget to keep a fully-drawn 4-routine entry scanning in a reasonable
+// number of QR parts instead of ballooning linearly with routine count.
+const ROUTINE_STROKE_CAP = 150;
 
-function drawRoutineCanvas(i) {
-  const cv = document.querySelector(`canvas.routine-start-canvas[data-idx="${i}"]`);
-  if (!cv) return;
-  const ctx = hidpi(cv);
-  drawFieldArt(ctx, cv);
-  const r = pitDraft.routines[i];
-  if (r && r.startX !== null && r.startX !== undefined) {
-    drawStartSquare(ctx, r.startX, r.startY, inferAllianceFromX(r.startX));
-  }
-}
-function renderRoutineWarning(i) {
-  const warnEl = document.querySelector(`[data-routinewarning="${i}"]`);
-  if (!warnEl) return;
-  const r = pitDraft.routines[i];
-  if (!r || r.startX === null || r.startX === undefined) { warnEl.textContent = ''; return; }
-  const warnings = checkStartLegality(r.startX, r.startY, inferAllianceFromX(r.startX));
-  warnEl.textContent = warnings.length ? ('⚠ ' + warnings.join('; ')) : ('Start: ' + r.startTile + ' ✓');
-  warnEl.style.color = warnings.length ? 'var(--yellow)' : 'var(--text-dim)';
+// One full-field drawing surface per routine (up to 4) — same engine as
+// match Auto Path (createDrawSurface), reused rather than reimplemented.
+// Recreated from scratch every renderPitRoutines() call, since that
+// function already rebuilds the whole routines section via innerHTML —
+// the old canvases (and their listeners) are discarded with the DOM nodes,
+// so each fresh array entry here always matches a live canvas. A routine
+// has no alliance of its own (pit scouting happens before any match), so
+// its start square's color/legality side (red vs blue) is inferred from
+// which half of the field it was placed on, same as the original tap-only
+// version of this feature did.
+let routineSurfaces = [];
+function wireRoutineToolButtons(eng, root) {
+  root.querySelectorAll('.color-swatch').forEach(btn => {
+    btn.addEventListener('click', () => {
+      eng.setColor(btn.dataset.color);
+      root.querySelectorAll('.color-swatch').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      root.querySelector('.routine-eraser-btn').classList.remove('active');
+    });
+  });
+  root.querySelector('.routine-eraser-btn').addEventListener('click', (e) => {
+    eng.setEraser();
+    root.querySelectorAll('.color-swatch').forEach(b => b.classList.remove('active'));
+    e.currentTarget.classList.add('active');
+  });
+  root.querySelectorAll('[data-thick]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      eng.setThick(Number(btn.dataset.thick));
+      root.querySelectorAll('[data-thick]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+  });
+  root.querySelector('.routine-undo-btn').addEventListener('click', eng.undo);
+  root.querySelector('.routine-clear-btn').addEventListener('click', eng.clear);
+  root.querySelector('.routine-setstart-btn').addEventListener('click', (e) => {
+    e.currentTarget.classList.toggle('active', eng.toggleSettingStart());
+  });
 }
 function renderPitRoutines() {
   const el = document.getElementById('pitRoutinesContainer');
@@ -2860,11 +2907,27 @@ function renderPitRoutines() {
         <input type="text" data-routinefield="name" data-idx="${i}" value="${esc(r.name)}" placeholder="e.g. Left 3-cycle" />
       </div>
       <div class="fc-field">
-        <div class="fc-label">Start Position (tap field)</div>
-        <div class="path-canvas-wrap" style="max-width:160px;">
-          <canvas class="routine-start-canvas" data-idx="${i}" width="722" height="722"></canvas>
+        <div class="fc-label">Auto Path — Draw on Field</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" data-routinetools="${i}">
+          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+            <button class="color-swatch active" style="background:#ffffff" data-color="#ffffff"></button>
+            <button class="color-swatch" style="background:#f0c040" data-color="#f0c040"></button>
+            <button class="color-swatch" style="background:#00e5ff" data-color="#00e5ff"></button>
+          </div>
+          <button class="path-tool-btn routine-eraser-btn">⌫ Erase</button>
+          <button class="path-tool-btn active" data-thick="2">Thin</button>
+          <button class="path-tool-btn" data-thick="5">Med</button>
+          <button class="path-tool-btn" data-thick="10">Thick</button>
+          <button class="path-tool-btn routine-undo-btn">↩ Undo</button>
+          <button class="path-tool-btn routine-clear-btn" style="color:var(--red)">Clear</button>
+          <button class="path-tool-btn routine-setstart-btn">📍 Set Start</button>
+          <span class="hint" style="margin:0" data-routinetilelabel="${i}"></span>
         </div>
-        <div class="hint" data-routinewarning="${i}" style="margin-top:4px;"></div>
+        <div class="path-canvas-wrap">
+          <canvas class="routine-bg-canvas" data-idx="${i}" width="722" height="722"></canvas>
+          <canvas class="routine-ink-canvas" data-idx="${i}" width="722" height="722"></canvas>
+        </div>
+        <p class="hint" data-routinewarning="${i}" style="display:none;color:var(--yellow);text-align:center;font-weight:700;margin-top:6px"></p>
       </div>
       <div class="fc-field">
         <div class="fc-label">What It Does</div>
@@ -2921,22 +2984,34 @@ function renderPitRoutines() {
       });
     });
   });
-  el.querySelectorAll('canvas.routine-start-canvas').forEach(cv => {
-    const i = Number(cv.dataset.idx);
-    drawRoutineCanvas(i);
-    renderRoutineWarning(i);
-    cv.addEventListener('click', (e) => {
-      const rect = cv.getBoundingClientRect();
-      const x = (e.clientX - rect.left) * PATH_W / rect.width;
-      const y = (e.clientY - rect.top) * PATH_H / rect.height;
-      const [sx, sy] = snapStartPosition(pxToFieldX(x), pxToFieldY(y));
-      pitDraft.routines[i].startX = sx;
-      pitDraft.routines[i].startY = sy;
-      pitDraft.routines[i].startTile = tileOf(sx, sy);
-      savePitDraftAutosave();
-      drawRoutineCanvas(i);
-      renderRoutineWarning(i);
+
+  routineSurfaces = pitDraft.routines.map((r, i) => {
+    const bg = el.querySelector(`canvas.routine-bg-canvas[data-idx="${i}"]`);
+    const ink = el.querySelector(`canvas.routine-ink-canvas[data-idx="${i}"]`);
+    if (!bg || !ink) return null;
+    const eng = createDrawSurface({
+      bgCanvas: bg, inkCanvas: ink,
+      getStrokes: () => pitDraft.routines[i].strokes,
+      setStrokes: (v) => { pitDraft.routines[i].strokes = v; },
+      getStart: () => [pitDraft.routines[i].startX, pitDraft.routines[i].startY, pitDraft.routines[i].startTile],
+      setStart: (x, y, tile) => { pitDraft.routines[i].startX = x; pitDraft.routines[i].startY = y; pitDraft.routines[i].startTile = tile; },
+      // A routine has no alliance of its own — infer which half it's on
+      // from its own start position (matches the pre-drawing version of
+      // this feature, which used the same inference for its diamond marker).
+      getAlliance: () => {
+        const sx = pitDraft.routines[i].startX;
+        return sx === null || sx === undefined ? '' : inferAllianceFromX(sx);
+      },
+      warningEl: el.querySelector(`[data-routinewarning="${i}"]`),
+      tileLabelEl: el.querySelector(`[data-routinetilelabel="${i}"]`),
+      onChange: savePitDraftAutosave,
+      onPlaceStart: savePitDraftAutosave,
+      wireToolButtons: (engine) => wireRoutineToolButtons(engine, el.querySelector(`[data-routinetools="${i}"]`)),
+      strokeCap: ROUTINE_STROKE_CAP,
     });
+    eng.init();
+    eng.replayAll();
+    return eng;
   });
 }
 document.getElementById('addRoutineBtn').addEventListener('click', () => {
@@ -3105,7 +3180,18 @@ function resetPitForm() {
   restorePitFieldsUI();
 }
 
+// True from page load until restorePitDraftIfAny() finishes deciding
+// whether there's a saved pit draft to bring back — same discipline as the
+// match draft's _draftRestorePending (see DRAFT AUTOSAVE above). Nothing
+// currently writes pitDraft between stampCurrentEvent(pitDraft) and
+// restorePitDraftIfAny() in init(), so this guard isn't fixing an active
+// bug today — it's here because routine drawing adds new write paths into
+// pitDraft (savePitDraftAutosave on every stroke/undo/clear/start-placement),
+// and without an explicit guard a future reordering could silently
+// reintroduce the exact startup race the match draft had.
+let _pitDraftRestorePending = true;
 function savePitDraftAutosave() {
+  if (_pitDraftRestorePending) return;
   try {
     localStorage.setItem(LS_PITDRAFT, JSON.stringify({ ...pitDraft, _savedAt: Date.now() }));
   } catch (err) {
@@ -3116,18 +3202,22 @@ function clearPitDraftAutosave() {
   try { localStorage.removeItem(LS_PITDRAFT); } catch (e) {}
 }
 function restorePitDraftIfAny() {
-  let raw;
-  try { raw = localStorage.getItem(LS_PITDRAFT); } catch (e) { return; }
-  if (!raw) return;
-  let snap;
-  try { snap = JSON.parse(raw); } catch (e) { try { localStorage.removeItem(LS_PITDRAFT); } catch(e2){} return; }
-  if (!pitDraftHasData(snap)) { try { localStorage.removeItem(LS_PITDRAFT); } catch(e){} return; }
-  // Pit drafts restore silently (no banner) since photos are already durable
-  // in IndexedDB and the form is low-stakes to re-populate; this still keeps
-  // the data from being silently lost if the tab closes.
-  pitDraft = { ...blankPit(), ...snap };
-  delete pitDraft._savedAt;
-  restorePitFieldsUI();
+  try {
+    let raw;
+    try { raw = localStorage.getItem(LS_PITDRAFT); } catch (e) { return; }
+    if (!raw) return;
+    let snap;
+    try { snap = JSON.parse(raw); } catch (e) { try { localStorage.removeItem(LS_PITDRAFT); } catch(e2){} return; }
+    if (!pitDraftHasData(snap)) { try { localStorage.removeItem(LS_PITDRAFT); } catch(e){} return; }
+    // Pit drafts restore silently (no banner) since photos are already durable
+    // in IndexedDB and the form is low-stakes to re-populate; this still keeps
+    // the data from being silently lost if the tab closes.
+    pitDraft = { ...blankPit(), ...snap };
+    delete pitDraft._savedAt;
+    restorePitFieldsUI();
+  } finally {
+    _pitDraftRestorePending = false;
+  }
 }
 
 let editingPitId = null;
@@ -3141,10 +3231,10 @@ document.getElementById('savePitBtn').addEventListener('click', async () => {
     let entry, next;
     if (editingPitId) {
       const old = pits.find(p => String(p.id) === String(editingPitId));
-      entry = { ...pitDraft, schemaVersion: 4, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 5, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, sent: false };
       next = pits.map(p => String(p.id) === String(editingPitId) ? entry : p);
     } else {
-      entry = { ...pitDraft, schemaVersion: 4, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 5, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, sent: false };
       next = [...pits, entry];
     }
     const ok = save(LS_PIT, next);
@@ -3500,12 +3590,41 @@ function mergePitEntriesForTeam(normTeamId) {
   merged.entries = entries;
   return merged;
 }
+// Shared by By Team (pitInfoCardHtml) and Compatibility's "Pit Auto
+// Routines" card — a small read-only field thumbnail per routine (field
+// art + its drawn path + start square) next to the existing text summary,
+// instead of just the start tile. Two-step like the Team/Compat Auto
+// Overlay: the HTML (with empty canvas placeholders) is built here
+// synchronously; drawRoutineDisplayCanvases() does the actual drawing in a
+// follow-up pass once those canvases actually exist in the DOM (a canvas
+// can't be drawn to before it's attached).
+function routineRowsHtml(routines, canvasClass) {
+  if (!routines || !routines.length) return '<div class="hint">No auto routines logged.</div>';
+  return routines.map((r, i) => `
+    <div class="review-row routine-display-row">
+      <div>
+        <span class="k">${esc(r.name || 'Routine ' + (i + 1))}</span>
+        <div class="hint" style="margin-top:2px;">${esc(r.startTile || '—')} · ${Number(r.claimedPoints) || 0} pts · ${esc(r.reliability || '—')}</div>
+      </div>
+      <div class="routine-display-canvas-wrap"><canvas class="${canvasClass}" data-ridx="${i}" width="${PATH_W}" height="${PATH_H}"></canvas></div>
+    </div>
+  `).join('');
+}
+function drawRoutineDisplayCanvases(routines, canvasClass) {
+  if (!routines) return;
+  document.querySelectorAll(`canvas.${canvasClass}`).forEach(cv => {
+    const r = routines[Number(cv.dataset.ridx)];
+    if (!r) return;
+    const ctx = hidpi(cv);
+    drawFieldArt(ctx, cv);
+    if (Array.isArray(r.strokes) && r.strokes.length) replayStrokes(ctx, r.strokes);
+    if (r.startX !== null && r.startX !== undefined) drawStartSquare(ctx, r.startX, r.startY, inferAllianceFromX(r.startX));
+  });
+}
 function pitInfoCardHtml(merged) {
   if (!merged) return '';
   const intakeText = (merged.intake && merged.intake.length) ? merged.intake.join(', ') : '—';
-  const routinesHtml = (merged.routines && merged.routines.length)
-    ? merged.routines.map((r, i) => `<div class="review-row"><span class="k">${esc(r.name || 'Routine ' + (i + 1))}</span><span>${esc(r.startTile || '—')} · ${Number(r.claimedPoints) || 0} pts · ${esc(r.reliability || '—')}</span></div>`).join('')
-    : '<div class="hint">No auto routines logged.</div>';
+  const routinesHtml = routineRowsHtml(merged.routines, 'byteam-routine-canvas');
   const notesHtml = (merged.notesList && merged.notesList.length)
     ? merged.notesList.map(n => `<div class="entry-meta" style="margin-top:4px;">"${esc(n.notes)}" <span style="color:var(--text-dim)">— ${esc(n.scouter || 'unknown')}, ${n.date ? esc(new Date(n.date).toLocaleDateString()) : ''}</span></div>`).join('')
     : '';
@@ -3633,6 +3752,7 @@ function renderTeamDetail() {
     });
   });
   renderTeamOverlay(team);
+  drawRoutineDisplayCanvases(mergedPit ? mergedPit.routines : [], 'byteam-routine-canvas');
 }
 
 // Task 4: Team Auto Overlay. Each match's strokes replay onto their OWN
@@ -4118,146 +4238,237 @@ function hidpi(canvas) {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   return ctx;
 }
+const FIELD_OX = FIELD_PAD, FIELD_OY = 0;
+
+// ══════════ DRAWABLE FIELD SURFACE (shared engine) ══════════
+// One factory, instantiated once for match scouting's Auto Path canvas and
+// once per Pit Scouting routine (up to 4) — root-cause rule: the pen/
+// thickness/eraser/Undo/Clear/Set-Start interaction logic lives here
+// exactly once, so a fix to drawing applies to both call sites. `cfg`:
+//   bgCanvas, inkCanvas: the two canvas elements (field art / scout's ink)
+//   getStrokes()/setStrokes(arr): accessor into wherever this instance's
+//     vector stroke array actually lives (draft.autoPathStrokes, or a
+//     pit routine's own `strokes` array)
+//   getStart()/setStart(x,y,tile): accessor into wherever startX/Y/Tile live
+//   getAlliance(): returns 'red'|'blue'|'' for legality + start-square color
+//   warningEl/tileLabelEl: optional DOM elements for the legality warning
+//     and "Start: X1" label (omit for a display-only, non-interactive use)
+//   onChange(): called after any stroke/undo/clear mutation (caller decides
+//     what to persist — flushDraftAutosave() for match, savePitDraftAutosave()
+//     for a routine)
+//   onPlaceStart(): called after a start placement specifically (match
+//     additionally needs its own debounced saveDraftAutosave() there)
+//   strokeCap: passed through to enforceStrokeCap(), default 400
+//   wireToolButtons(engine): caller wires its own tool button DOM (ids
+//     differ between the single match canvas and N routine canvases) by
+//     calling engine.setColor/setEraser/setThick/undo/clear/toggleSettingStart
 // getImageData/putImageData ignore the canvas transform and always address
 // the raw backing buffer, so a full-canvas snapshot must ask for the
 // DPR-scaled buffer size, not the logical PATH_W/PATH_H.
-function inkFullSnapshot() { return _pCtx.getImageData(0, 0, Math.round(PATH_W * DPR), Math.round(PATH_H * DPR)); }
-const FIELD_OX = FIELD_PAD, FIELD_OY = 0;
-let _bgCtx = null;
-let _pCtx = null, _pDrawing = false, _pLX = 0, _pLY = 0, _pColor = '#ffffff', _pThick = 2, _pEraser = false, _pUndo = [];
-// Parallel undo stack for the vector stroke list (draft.autoPathStrokes),
-// kept 1:1 with _pUndo so Undo/Clear restore pixels and strokes together.
-let _strokeUndo = [];
-let _currentStrokePts = []; // raw canvas-px points for the stroke in progress
-// True once the scout has drawn anything on the ink layer since the last
-// clear/reset — lets beforeunload warn even if no other field was touched.
-let _inkTouched = false;
+function inkFullSnapshot(ctx) { return ctx.getImageData(0, 0, Math.round(PATH_W * DPR), Math.round(PATH_H * DPR)); }
+function createDrawSurface(cfg) {
+  const eng = {
+    pCtx: null, bgCtx: null, pDrawing: false, pLX: 0, pLY: 0,
+    pColor: '#ffffff', pThick: 2, pEraser: false, pUndo: [], strokeUndo: [],
+    currentStrokePts: [],
+    // True once this surface has drawn anything on its ink layer since the
+    // last clear/reset — the match instance's copy of this backs
+    // beforeunload's "unsaved work" warning.
+    inkTouched: false,
+    settingStart: false,
+  };
+  eng.drawField = function() {
+    if (!eng.bgCtx) return;
+    drawFieldArt(eng.bgCtx, cfg.bgCanvas);
+    const [x, y] = cfg.getStart();
+    if (x !== null && y !== null) drawStartSquare(eng.bgCtx, x, y, cfg.getAlliance());
+  };
+  eng.renderWarning = function() {
+    if (!cfg.warningEl) return;
+    const [x, y, tile] = cfg.getStart();
+    if (x === null || y === null) {
+      cfg.warningEl.style.display = 'none';
+      if (cfg.tileLabelEl) cfg.tileLabelEl.textContent = '';
+      return;
+    }
+    if (cfg.tileLabelEl) cfg.tileLabelEl.textContent = 'Start: ' + tile;
+    const alliance = cfg.getAlliance();
+    if (!alliance) { cfg.warningEl.style.display = 'none'; return; }
+    const warnings = checkStartLegality(x, y, alliance);
+    if (warnings.length) {
+      cfg.warningEl.textContent = '⚠ Start position ' + warnings.join(', ');
+      cfg.warningEl.style.display = 'block';
+    } else {
+      cfg.warningEl.style.display = 'none';
+    }
+  };
+  eng.placeStartAt = function(tx, ty) {
+    const [x, y] = snapStartPosition(tx, ty);
+    cfg.setStart(x, y, tileOf(x, y));
+    eng.drawField();
+    eng.renderWarning();
+    if (cfg.onPlaceStart) cfg.onPlaceStart();
+  };
+  eng.replayAll = function() {
+    if (!eng.pCtx) return;
+    eng.pCtx.clearRect(0, 0, PATH_W, PATH_H);
+    replayStrokes(eng.pCtx, cfg.getStrokes());
+  };
+  function pXY(e, cv) {
+    const r = cv.getBoundingClientRect();
+    return [(e.clientX - r.left) * PATH_W / r.width, (e.clientY - r.top) * PATH_H / r.height];
+  }
+  function pStart(e, cv) {
+    if (!eng.pCtx) return;
+    const [x, y] = pXY(e, cv);
+    if (eng.settingStart) { eng.placeStartAt(pxToFieldX(x), pxToFieldY(y)); return; } // tap places/moves the start square; no stroke begins
+    eng.pDrawing = true;
+    eng.inkTouched = true;
+    eng.pLX = x; eng.pLY = y;
+    eng.currentStrokePts = [[x, y]];
+    eng.pUndo.push(inkFullSnapshot(eng.pCtx));
+    eng.strokeUndo.push(JSON.parse(JSON.stringify(cfg.getStrokes())));
+    if (eng.pUndo.length > 30) eng.pUndo.shift();
+    if (eng.strokeUndo.length > 30) eng.strokeUndo.shift();
+  }
+  function pMove(e, cv) {
+    if (eng.settingStart) return;
+    if (!eng.pDrawing || !eng.pCtx) return;
+    const [x, y] = pXY(e, cv);
+    eng.currentStrokePts.push([x, y]);
+    eng.pCtx.beginPath();
+    eng.pCtx.moveTo(eng.pLX, eng.pLY);
+    eng.pCtx.lineTo(x, y);
+    // Eraser removes ink pixels (true transparency) instead of painting the
+    // field's background color — the field layer is a separate canvas, so
+    // there is no field color to paint over anymore.
+    eng.pCtx.globalCompositeOperation = eng.pEraser ? 'destination-out' : 'source-over';
+    eng.pCtx.strokeStyle = eng.pEraser ? 'rgba(0,0,0,1)' : eng.pColor;
+    eng.pCtx.lineWidth = eng.pEraser ? 24 : eng.pThick;
+    eng.pCtx.lineCap = eng.pCtx.lineJoin = 'round';
+    eng.pCtx.stroke();
+    eng.pCtx.globalCompositeOperation = 'source-over';
+    [eng.pLX, eng.pLY] = [x, y];
+  }
+  function pEnd() {
+    if (eng.settingStart) return;
+    if (eng.pDrawing) {
+      if (eng.currentStrokePts.length >= 2) {
+        const fieldPts = eng.currentStrokePts.map(([px, py]) => [pxToFieldX(px), pxToFieldY(py)]);
+        const simplified = douglasPeucker(fieldPts, 0.75);
+        const rounded = simplified.map(([x, y]) => [Math.round(x * 2) / 2, Math.round(y * 2) / 2]);
+        const strokes = cfg.getStrokes();
+        strokes.push({ color: eng.pColor, width: (eng.pEraser ? 24 : eng.pThick) / IN, erase: eng.pEraser, pts: rounded });
+        enforceStrokeCap(strokes, cfg.strokeCap);
+      }
+      if (cfg.onChange) cfg.onChange();
+    }
+    eng.pDrawing = false;
+  }
+  eng.undo = function() {
+    if (!eng.pCtx || !eng.pUndo.length) return;
+    eng.pCtx.putImageData(eng.pUndo.pop(), 0, 0);
+    if (eng.strokeUndo.length) cfg.setStrokes(eng.strokeUndo.pop());
+    if (cfg.onChange) cfg.onChange();
+  };
+  eng.clear = function() {
+    if (!eng.pCtx) return;
+    eng.pUndo.push(inkFullSnapshot(eng.pCtx));
+    eng.strokeUndo.push(JSON.parse(JSON.stringify(cfg.getStrokes())));
+    if (eng.pUndo.length > 30) eng.pUndo.shift();
+    if (eng.strokeUndo.length > 30) eng.strokeUndo.shift();
+    eng.pCtx.clearRect(0, 0, PATH_W, PATH_H); // only the ink layer; field art untouched
+    cfg.setStrokes([]);
+    eng.inkTouched = false;
+    if (cfg.onChange) cfg.onChange();
+  };
+  eng.setColor = function(c) { eng.pColor = c; eng.pEraser = false; };
+  eng.setEraser = function() { eng.pEraser = true; };
+  eng.setThick = function(n) { eng.pThick = n; };
+  eng.toggleSettingStart = function() { eng.settingStart = !eng.settingStart; return eng.settingStart; };
+  eng.init = function() {
+    if (eng.pCtx) return;
+    eng.bgCtx = hidpi(cfg.bgCanvas);
+    eng.pCtx = hidpi(cfg.inkCanvas);
+    eng.drawField(); // draws onto the bg layer only; ink layer stays transparent
+    const cv = cfg.inkCanvas;
+    cv.addEventListener('mousedown', e => pStart(e, cv));
+    cv.addEventListener('mousemove', e => pMove(e, cv));
+    cv.addEventListener('mouseup', pEnd);
+    cv.addEventListener('mouseleave', pEnd);
+    cv.addEventListener('touchstart', e => { e.preventDefault(); pStart(e.touches[0], cv); }, { passive: false });
+    cv.addEventListener('touchmove', e => { e.preventDefault(); pMove(e.touches[0], cv); }, { passive: false });
+    cv.addEventListener('touchend', pEnd, { passive: false });
+    if (cfg.wireToolButtons) cfg.wireToolButtons(eng);
+  };
+  return eng;
+}
 
+// The match scouting instance — created once, lives for the page's whole
+// session (unlike routine instances, which are recreated every time
+// renderPitRoutines() rebuilds that section's DOM). Thin wrapper functions
+// below (drawPathField, renderStartWarning, placeStart, undoAutoPath,
+// clearAutoPath, clearStartPosition, restoreStartPositionUI) preserve the
+// exact names/signatures every other part of the match-scouting code
+// already calls, so nothing outside this block needed to change.
+let matchSurface = null;
 function initAutoPathCanvas() {
   const bg = document.getElementById('auto-path-bg-canvas');
   const cv = document.getElementById('auto-path-canvas');
-  if (!bg || !cv || _pCtx) return;
-  _bgCtx = hidpi(bg);
-  _pCtx = hidpi(cv);
-  drawPathField(); // draws onto the bg layer only; ink layer stays transparent
-  cv.addEventListener('mousedown', e => _pStart(e, cv));
-  cv.addEventListener('mousemove', e => _pMove(e, cv));
-  cv.addEventListener('mouseup', _pEnd);
-  cv.addEventListener('mouseleave', _pEnd);
-  cv.addEventListener('touchstart', e => { e.preventDefault(); _pStart(e.touches[0], cv); }, { passive: false });
-  cv.addEventListener('touchmove', e => { e.preventDefault(); _pMove(e.touches[0], cv); }, { passive: false });
-  cv.addEventListener('touchend', _pEnd, { passive: false });
-
-  document.querySelectorAll('#pathSwatches .color-swatch').forEach(btn => {
-    btn.addEventListener('click', () => {
-      _pColor = btn.dataset.color; _pEraser = false;
-      document.querySelectorAll('#pathSwatches .color-swatch').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('path-eraser-btn').classList.remove('active');
-    });
+  if (!bg || !cv || matchSurface) return;
+  matchSurface = createDrawSurface({
+    bgCanvas: bg, inkCanvas: cv,
+    getStrokes: () => draft.autoPathStrokes,
+    setStrokes: (v) => { draft.autoPathStrokes = v; },
+    getStart: () => [draft.startX, draft.startY, draft.startTile],
+    setStart: (x, y, tile) => { draft.startX = x; draft.startY = y; draft.startTile = tile; },
+    getAlliance: () => draft.alliance,
+    warningEl: document.getElementById('startWarning'),
+    tileLabelEl: document.getElementById('startTileLabel'),
+    onChange: () => { saveInkAutosave(); flushDraftAutosave(); },
+    onPlaceStart: () => saveDraftAutosave(),
+    wireToolButtons: (eng) => {
+      document.querySelectorAll('#pathSwatches .color-swatch').forEach(btn => {
+        btn.addEventListener('click', () => {
+          eng.setColor(btn.dataset.color);
+          document.querySelectorAll('#pathSwatches .color-swatch').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          document.getElementById('path-eraser-btn').classList.remove('active');
+        });
+      });
+      document.getElementById('path-eraser-btn').addEventListener('click', (e) => {
+        eng.setEraser();
+        document.querySelectorAll('#pathSwatches .color-swatch').forEach(b => b.classList.remove('active'));
+        e.currentTarget.classList.add('active');
+      });
+      document.querySelectorAll('[data-thick]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          eng.setThick(Number(btn.dataset.thick));
+          document.querySelectorAll('[data-thick]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+        });
+      });
+      document.getElementById('path-undo-btn').addEventListener('click', eng.undo);
+      document.getElementById('path-clear-btn').addEventListener('click', eng.clear);
+      document.getElementById('set-start-btn').addEventListener('click', (e) => {
+        e.currentTarget.classList.toggle('active', eng.toggleSettingStart());
+      });
+    },
   });
-  document.getElementById('path-eraser-btn').addEventListener('click', (e) => {
-    _pEraser = true;
-    document.querySelectorAll('#pathSwatches .color-swatch').forEach(b => b.classList.remove('active'));
-    e.currentTarget.classList.add('active');
-  });
-  document.querySelectorAll('[data-thick]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      _pThick = Number(btn.dataset.thick);
-      document.querySelectorAll('[data-thick]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-    });
-  });
-  document.getElementById('path-undo-btn').addEventListener('click', undoAutoPath);
-  document.getElementById('path-clear-btn').addEventListener('click', clearAutoPath);
-  document.getElementById('set-start-btn').addEventListener('click', (e) => {
-    _settingStart = !_settingStart;
-    e.currentTarget.classList.toggle('active', _settingStart);
-  });
+  matchSurface.init();
 }
+function undoAutoPath() { if (matchSurface) matchSurface.undo(); }
+function clearAutoPath() { if (matchSurface) matchSurface.clear(); }
 
-function _pXY(e, cv) {
-  const r = cv.getBoundingClientRect();
-  return [(e.clientX - r.left) * PATH_W / r.width, (e.clientY - r.top) * PATH_H / r.height];
-}
-function _pStart(e, cv) {
-  if (!_pCtx) return;
-  const [x, y] = _pXY(e, cv);
-  if (_settingStart) { placeStart(pxToFieldX(x), pxToFieldY(y)); return; } // tap places/moves the start square; no stroke begins
-  _pDrawing = true;
-  _inkTouched = true;
-  _pLX = x; _pLY = y;
-  _currentStrokePts = [[x, y]];
-  _pUndo.push(inkFullSnapshot());
-  _strokeUndo.push(JSON.parse(JSON.stringify(draft.autoPathStrokes)));
-  if (_pUndo.length > 30) _pUndo.shift();
-  if (_strokeUndo.length > 30) _strokeUndo.shift();
-}
-function _pMove(e, cv) {
-  if (_settingStart) return;
-  if (!_pDrawing || !_pCtx) return;
-  const [x, y] = _pXY(e, cv);
-  _currentStrokePts.push([x, y]);
-  _pCtx.beginPath();
-  _pCtx.moveTo(_pLX, _pLY);
-  _pCtx.lineTo(x, y);
-  // Eraser removes ink pixels (true transparency) instead of painting the
-  // field's background color — the field layer is a separate canvas, so
-  // there is no field color to paint over anymore.
-  _pCtx.globalCompositeOperation = _pEraser ? 'destination-out' : 'source-over';
-  _pCtx.strokeStyle = _pEraser ? 'rgba(0,0,0,1)' : _pColor;
-  _pCtx.lineWidth = _pEraser ? 24 : _pThick;
-  _pCtx.lineCap = _pCtx.lineJoin = 'round';
-  _pCtx.stroke();
-  _pCtx.globalCompositeOperation = 'source-over';
-  [_pLX, _pLY] = [x, y];
-}
-function _pEnd() {
-  if (_settingStart) return;
-  if (_pDrawing) {
-    if (_currentStrokePts.length >= 2) {
-      const fieldPts = _currentStrokePts.map(([px, py]) => [pxToFieldX(px), pxToFieldY(py)]);
-      const simplified = douglasPeucker(fieldPts, 0.75);
-      const rounded = simplified.map(([x, y]) => [Math.round(x * 2) / 2, Math.round(y * 2) / 2]);
-      draft.autoPathStrokes.push({ color: _pColor, width: (_pEraser ? 24 : _pThick) / IN, erase: _pEraser, pts: rounded });
-      enforceStrokeCap();
-    }
-    saveInkAutosave();
-    // Flushed immediately, not debounced: the stroke list is what a restore
-    // prefers over the ink PNG (see applyDraftSnapshot), so it has to land
-    // in storage as reliably and promptly as the ink itself does.
-    flushDraftAutosave();
-  }
-  _pDrawing = false;
-}
-
-function undoAutoPath() {
-  if (!_pCtx || !_pUndo.length) return;
-  _pCtx.putImageData(_pUndo.pop(), 0, 0);
-  if (_strokeUndo.length) draft.autoPathStrokes = _strokeUndo.pop();
-  saveInkAutosave();
-  flushDraftAutosave();
-}
-function clearAutoPath() {
-  if (!_pCtx) return;
-  _pUndo.push(inkFullSnapshot());
-  _strokeUndo.push(JSON.parse(JSON.stringify(draft.autoPathStrokes)));
-  if (_pUndo.length > 30) _pUndo.shift();
-  if (_strokeUndo.length > 30) _strokeUndo.shift();
-  _pCtx.clearRect(0, 0, PATH_W, PATH_H); // only the ink layer; field art untouched
-  draft.autoPathStrokes = [];
-  _inkTouched = false;
-  saveInkAutosave();
-  flushDraftAutosave();
-}
-
-// Cap total stored points across all of this entry's strokes (~400) by
+// Cap total stored points across a stroke array (~400 by default) by
 // dropping the oldest strokes first — keeps the most recent drawing intact.
-function enforceStrokeCap(cap) {
+// Shared by match Auto Path (draft.autoPathStrokes) and pit routines (each
+// routine's own strokes array).
+function enforceStrokeCap(strokes, cap) {
   cap = cap || 400;
-  let total = draft.autoPathStrokes.reduce((s, st) => s + st.pts.length, 0);
-  while (total > cap && draft.autoPathStrokes.length > 1) {
-    total -= draft.autoPathStrokes.shift().pts.length;
+  let total = strokes.reduce((s, st) => s + st.pts.length, 0);
+  while (total > cap && strokes.length > 1) {
+    total -= strokes.shift().pts.length;
   }
 }
 
@@ -4495,18 +4706,13 @@ function drawFieldArt(c, canvasEl) {
 // Draws the static field art onto the bg layer, then the start-position
 // square on top of it (if one is set) — both belong to the "background",
 // never touched by Erase/Undo/Clear, which only affect the ink layer.
-function drawPathField() {
-  if (!_bgCtx) return;
-  drawFieldArt(_bgCtx, document.getElementById('auto-path-bg-canvas'));
-  if (draft.startX !== null && draft.startY !== null) drawStartSquare(_bgCtx, draft.startX, draft.startY, draft.alliance);
-}
+function drawPathField() { if (matchSurface) matchSurface.drawField(); }
 
 /* ══════════ START POSITION (Auto step) ══════════
    18x18in robot footprint, centered on a tap, snapped to touch whichever
    perimeter wall is nearest. Lives on the bg layer (redrawn with the field
    art) so Erase/Undo/Clear on the ink layer can never affect it. */
 const START_SIZE = 18;
-let _settingStart = false;
 
 function fieldXToPx(x) { return FIELD_OX + x * IN; }
 function fieldYToPx(y) { return FIELD_OY + y * IN; }
@@ -4567,42 +4773,17 @@ function drawStartSquare(ctx, x, y, alliance) {
   ctx.strokeRect(px0, py0, size, size);
 }
 
-function renderStartWarning() {
-  const el = document.getElementById('startWarning');
-  const label = document.getElementById('startTileLabel');
-  if (draft.startX === null || draft.startY === null) {
-    el.style.display = 'none';
-    label.textContent = '';
-    return;
-  }
-  label.textContent = 'Start: ' + draft.startTile;
-  if (!draft.alliance) { el.style.display = 'none'; return; }
-  const warnings = checkStartLegality(draft.startX, draft.startY, draft.alliance);
-  if (warnings.length) {
-    el.textContent = '⚠ Start position ' + warnings.join(', ');
-    el.style.display = 'block';
-  } else {
-    el.style.display = 'none';
-  }
-}
+function renderStartWarning() { if (matchSurface) matchSurface.renderWarning(); }
 
-function placeStart(tx, ty) {
-  const [x, y] = snapStartPosition(tx, ty);
-  draft.startX = x; draft.startY = y; draft.startTile = tileOf(x, y);
-  drawPathField();
-  renderStartWarning();
-  saveDraftAutosave();
-}
+function placeStart(tx, ty) { if (matchSurface) matchSurface.placeStartAt(tx, ty); }
 
 function clearStartPosition() {
   draft.startX = null; draft.startY = null; draft.startTile = '';
-  if (_bgCtx) drawPathField();
-  renderStartWarning();
+  if (matchSurface) { matchSurface.drawField(); matchSurface.renderWarning(); }
 }
 
 function restoreStartPositionUI() {
-  if (_bgCtx) drawPathField();
-  renderStartWarning();
+  if (matchSurface) { matchSurface.drawField(); matchSurface.renderWarning(); }
 }
 
 
@@ -5634,14 +5815,53 @@ const PIT_KEY_MAP = [
   ['preferredSide','ps'], ['driverPractice','dp'],
   ['notes','no'],
 ];
+// Each routine's own fields, shortened the same way as the pit entry itself
+// — including its drawn strokes, via the SAME QR_STROKE_KEY_MAP match
+// autoPathStrokes already use. Previously routines rode along wholesale
+// with full field names; now that each one can carry a full drawing (up to
+// ROUTINE_STROKE_CAP points, see createDrawSurface's strokeCap below),
+// leaving that unshortened would needlessly bloat a 4-routine pit entry's
+// QR payload.
+const ROUTINE_KEY_MAP = [
+  ['name','n'], ['startX','sx'], ['startY','sy'], ['startTile','st'],
+  ['description','ds'], ['claimedPoints','pt'], ['reliability','rl'],
+];
+function shortenRoutine(r) {
+  const out = {};
+  ROUTINE_KEY_MAP.forEach(([long, short]) => { if (r[long] !== undefined) out[short] = r[long]; });
+  out.s = (Array.isArray(r.strokes) ? r.strokes : []).map(st => {
+    const s = {};
+    QR_STROKE_KEY_MAP.forEach(([long, short]) => { if (st[long] !== undefined) s[short] = st[long]; });
+    return s;
+  });
+  return out;
+}
+function expandRoutine(s) {
+  const out = {};
+  ROUTINE_KEY_MAP.forEach(([long, short]) => { if (s[short] !== undefined) out[long] = s[short]; });
+  out.strokes = (Array.isArray(s.s) ? s.s : []).map(st => {
+    const o = {};
+    QR_STROKE_KEY_MAP.forEach(([long, short]) => { if (st[short] !== undefined) o[long] = st[short]; });
+    return o;
+  });
+  return out;
+}
 function shortenPit(p) {
   const out = {};
-  PIT_KEY_MAP.forEach(([long, short]) => { if (p[long] !== undefined) out[short] = p[long]; });
+  PIT_KEY_MAP.forEach(([long, short]) => {
+    if (long === 'routines') return; // shortened separately below, including each routine's own strokes
+    if (p[long] !== undefined) out[short] = p[long];
+  });
+  out.rt = (Array.isArray(p.routines) ? p.routines : []).map(shortenRoutine);
   return out;
 }
 function expandPit(s) {
   const out = {};
-  PIT_KEY_MAP.forEach(([long, short]) => { if (s[short] !== undefined) out[long] = s[short]; });
+  PIT_KEY_MAP.forEach(([long, short]) => {
+    if (long === 'routines') return;
+    if (s[short] !== undefined) out[long] = s[short];
+  });
+  out.routines = (Array.isArray(s.rt) ? s.rt : []).map(expandRoutine);
   out.sent = false;
   out.photoIds = []; // photos never travel over QR — backup JSON only
   return out;
@@ -6664,14 +6884,16 @@ function renderCompatDetail() {
     <div class="card">
       <div class="card-title">Pit Auto Routines</div>
       <div class="est-breakdown" style="margin-bottom:6px;color:var(--text)">Us (#${esc(ourNorm)})</div>
-      ${ourPit && ourPit.routines.length ? ourPit.routines.map((r,i) => `<div class="review-row"><span class="k">${esc(r.name||'Routine '+(i+1))}</span><span>${esc(r.startTile||'—')} · ${Number(r.claimedPoints)||0} pts · ${esc(r.reliability||'—')}</span></div>`).join('') : '<div class="hint">No routines logged.</div>'}
+      ${routineRowsHtml(ourPit ? ourPit.routines : [], 'compat-our-routine-canvas')}
       <div class="est-breakdown" style="margin:10px 0 6px;color:var(--text)">Them (#${esc(theirNorm)})</div>
-      ${theirPit && theirPit.routines.length ? theirPit.routines.map((r,i) => `<div class="review-row"><span class="k">${esc(r.name||'Routine '+(i+1))}</span><span>${esc(r.startTile||'—')} · ${Number(r.claimedPoints)||0} pts · ${esc(r.reliability||'—')}</span></div>`).join('') : '<div class="hint">No routines logged.</div>'}
+      ${routineRowsHtml(theirPit ? theirPit.routines : [], 'compat-their-routine-canvas')}
     </div>
   `;
   const ourEntries = matches.filter(m => normTeam(m.teamNumber) === ourNorm);
   const theirEntries = matches.filter(m => normTeam(m.teamNumber) === theirNorm);
   renderCompatOverlay(ourEntries, theirEntries, ourPit ? ourPit.routines : [], theirPit ? theirPit.routines : []);
+  drawRoutineDisplayCanvases(ourPit ? ourPit.routines : [], 'compat-our-routine-canvas');
+  drawRoutineDisplayCanvases(theirPit ? theirPit.routines : [], 'compat-their-routine-canvas');
 }
 
 /* ══════════ IMAGE ZIP EXPORT ══════════ */
@@ -6826,8 +7048,8 @@ async function runSelfTests() {
     draftInk: await idbGetImage(DRAFT_INK_ID).catch(() => null),
     matches: JSON.parse(JSON.stringify(matches)),
     pits: JSON.parse(JSON.stringify(pits)),
-    inkCanvasData: (_pCtx ? inkFullSnapshot() : null),
-    inkTouched: _inkTouched,
+    inkCanvasData: (matchSurface && matchSurface.pCtx ? inkFullSnapshot(matchSurface.pCtx) : null),
+    inkTouched: (matchSurface ? matchSurface.inkTouched : false),
     draftBannerDisplay: document.getElementById('draftBanner').style.display,
     pickList: pickList.slice(),
     allianceSize,
@@ -7029,23 +7251,24 @@ async function runSelfTests() {
 
     // 7. eraser leaves field (bg) pixels untouched
     try {
-      if (_pCtx && _bgCtx) {
+      if (matchSurface && matchSurface.pCtx && matchSurface.bgCtx) {
+        const pCtx = matchSurface.pCtx, bgCtx = matchSurface.bgCtx;
         // getImageData is raw-buffer-space and ignores the DPR transform,
         // so sample coordinates must be scaled by DPR to land on the same
         // logical point the drawing calls (which DO go through the
         // transform, so stay in logical units) actually painted.
-        const bgPixelBefore = _bgCtx.getImageData(Math.round((FIELD_OX + 3) * DPR), Math.round(10 * DPR), 1, 1).data.join(',');
-        _pCtx.clearRect(0, 0, PATH_W, PATH_H);
-        _pCtx.globalCompositeOperation = 'source-over';
-        _pCtx.strokeStyle = '#ffffff'; _pCtx.lineWidth = 10;
-        _pCtx.beginPath(); _pCtx.moveTo(100, 100); _pCtx.lineTo(150, 150); _pCtx.stroke();
-        const inkBefore = _pCtx.getImageData(Math.round(125 * DPR), Math.round(125 * DPR), 1, 1).data[3];
-        _pCtx.globalCompositeOperation = 'destination-out';
-        _pCtx.strokeStyle = 'rgba(0,0,0,1)'; _pCtx.lineWidth = 24;
-        _pCtx.beginPath(); _pCtx.moveTo(100, 100); _pCtx.lineTo(150, 150); _pCtx.stroke();
-        _pCtx.globalCompositeOperation = 'source-over';
-        const inkAfter = _pCtx.getImageData(Math.round(125 * DPR), Math.round(125 * DPR), 1, 1).data[3];
-        const bgPixelAfter = _bgCtx.getImageData(Math.round((FIELD_OX + 3) * DPR), Math.round(10 * DPR), 1, 1).data.join(',');
+        const bgPixelBefore = bgCtx.getImageData(Math.round((FIELD_OX + 3) * DPR), Math.round(10 * DPR), 1, 1).data.join(',');
+        pCtx.clearRect(0, 0, PATH_W, PATH_H);
+        pCtx.globalCompositeOperation = 'source-over';
+        pCtx.strokeStyle = '#ffffff'; pCtx.lineWidth = 10;
+        pCtx.beginPath(); pCtx.moveTo(100, 100); pCtx.lineTo(150, 150); pCtx.stroke();
+        const inkBefore = pCtx.getImageData(Math.round(125 * DPR), Math.round(125 * DPR), 1, 1).data[3];
+        pCtx.globalCompositeOperation = 'destination-out';
+        pCtx.strokeStyle = 'rgba(0,0,0,1)'; pCtx.lineWidth = 24;
+        pCtx.beginPath(); pCtx.moveTo(100, 100); pCtx.lineTo(150, 150); pCtx.stroke();
+        pCtx.globalCompositeOperation = 'source-over';
+        const inkAfter = pCtx.getImageData(Math.round(125 * DPR), Math.round(125 * DPR), 1, 1).data[3];
+        const bgPixelAfter = bgCtx.getImageData(Math.round((FIELD_OX + 3) * DPR), Math.round(10 * DPR), 1, 1).data.join(',');
         const pass = inkBefore > 0 && inkAfter === 0 && bgPixelBefore === bgPixelAfter;
         record('eraser clears ink only, field layer untouched', pass, `inkBefore=${inkBefore} inkAfter=${inkAfter}`);
       } else {
@@ -7730,9 +7953,10 @@ async function runSelfTests() {
 
     // Hi-DPI canvas: ink layer's backing buffer is PATH_W/H * DPR.
     try {
-      const pass = !!_pCtx && _pCtx.canvas.width === Math.round(PATH_W * DPR) && _pCtx.canvas.height === Math.round(PATH_H * DPR);
+      const pCtx = matchSurface && matchSurface.pCtx;
+      const pass = !!pCtx && pCtx.canvas.width === Math.round(PATH_W * DPR) && pCtx.canvas.height === Math.round(PATH_H * DPR);
       record('Hi-DPI canvas: ink layer backing buffer is PATH_W/H * DPR', pass,
-        `canvas=${_pCtx && _pCtx.canvas.width}x${_pCtx && _pCtx.canvas.height} expected=${Math.round(PATH_W * DPR)}x${Math.round(PATH_H * DPR)}`);
+        `canvas=${pCtx && pCtx.canvas.width}x${pCtx && pCtx.canvas.height} expected=${Math.round(PATH_W * DPR)}x${Math.round(PATH_H * DPR)}`);
     } catch (err) { record('Hi-DPI canvas: ink layer backing buffer is PATH_W/H * DPR', false, err.message); }
 
     // Pointer mapping is DPR-independent by construction: fieldXToPx/pxToFieldX
@@ -8962,6 +9186,151 @@ async function runSelfTests() {
       renderPitTeamSuggestions();
     } catch (err) { record('Pit team picker: lists ALL fixture teams (no 12 cap), correct done counter/marking, filters by number and by name, Hide done toggle actually hides them', false, err.message); }
 
+    // Pit routine drawing: draw/undo/clear on a routine's full-field canvas,
+    // via the SAME createDrawSurface() engine match Auto Path uses (root-
+    // cause rule — one engine, two call sites). renderPitRoutines() builds
+    // real canvases in the real (if currently hidden) Pit page DOM, so this
+    // exercises the actual rendering path, not a mock.
+    try {
+      const savedPitDraft = JSON.parse(JSON.stringify(pitDraft));
+      pitDraft = { ...blankPit(), routines: [blankRoutine()] };
+      renderPitRoutines();
+      const eng = routineSurfaces[0];
+      const engineReady = !!(eng && eng.pCtx && eng.bgCtx);
+
+      // Route a real stroke through the real pointer handlers (mousedown/
+      // move/up), same as a genuine tap-drag would, via the canvas's own
+      // DOM events — this runs inside the page already, so dispatchEvent
+      // reaches the exact listeners createDrawSurface().init() attached.
+      const cv = document.querySelector('canvas.routine-ink-canvas[data-idx="0"]');
+      const rect = cv.getBoundingClientRect();
+      cv.dispatchEvent(new MouseEvent('mousedown', { clientX: rect.left + 20, clientY: rect.top + 20, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mousemove', { clientX: rect.left + 60, clientY: rect.top + 60, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mouseup', { clientX: rect.left + 60, clientY: rect.top + 60, bubbles: true }));
+      const strokesAfterDraw = pitDraft.routines[0].strokes.length;
+
+      eng.undo();
+      const strokesAfterUndo = pitDraft.routines[0].strokes.length;
+
+      // Redraw, then Clear should empty strokes AND wipe the ink canvas.
+      cv.dispatchEvent(new MouseEvent('mousedown', { clientX: rect.left + 20, clientY: rect.top + 20, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mousemove', { clientX: rect.left + 60, clientY: rect.top + 60, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mouseup', { clientX: rect.left + 60, clientY: rect.top + 60, bubbles: true }));
+      eng.clear();
+      const strokesAfterClear = pitDraft.routines[0].strokes.length;
+
+      // Set Start, via the same toggle + placeStartAt path the real
+      // "Set Start" button uses.
+      eng.toggleSettingStart();
+      eng.placeStartAt(20, 40);
+      const startSet = pitDraft.routines[0].startX !== null && pitDraft.routines[0].startTile !== '';
+
+      const pass = engineReady && strokesAfterDraw === 1 && strokesAfterUndo === 0 && strokesAfterClear === 0 && startSet;
+      record('Pit routine: draw/undo/clear/set-start all work through the shared drawing engine', pass,
+        JSON.stringify({ engineReady, strokesAfterDraw, strokesAfterUndo, strokesAfterClear, startSet, startTile: pitDraft.routines[0].startTile }));
+
+      pitDraft = savedPitDraft;
+      renderPitRoutines();
+    } catch (err) { record('Pit routine: draw/undo/clear/set-start all work through the shared drawing engine', false, err.message); }
+
+    // Pit routine migration (v4 -> v5): an old routine with no `strokes`
+    // field gets one defaulted to [] — its existing startX/Y/Tile (already
+    // the routine's full-field start marker before this feature existed)
+    // carry forward completely unchanged, no data lost.
+    try {
+      const oldRoutine = { name: 'Old routine', startX: 10, startY: 20, startTile: 'A2', description: 'desc', claimedPoints: 3, reliability: 'Usually' };
+      const p = { id: 'ct_migrate_routine', teamNumber: '9950', schemaVersion: 4, routines: [JSON.parse(JSON.stringify(oldRoutine))], ts: new Date().toISOString() };
+      const changed = migratePitEntryV5(p);
+      const pass = changed && p.schemaVersion === 5 && Array.isArray(p.routines[0].strokes) && p.routines[0].strokes.length === 0 &&
+        p.routines[0].startX === 10 && p.routines[0].startY === 20 && p.routines[0].startTile === 'A2' &&
+        p.routines[0].name === 'Old routine' && p.routines[0].claimedPoints === 3;
+      record('migratePitEntryV5: old routine gets strokes=[] defaulted, every existing field preserved unchanged', pass, JSON.stringify(p.routines[0]));
+      // Idempotent: already-migrated entries are left alone.
+      const unchanged = migratePitEntryV5(p);
+      record('migratePitEntryV5 is a no-op once schemaVersion is already 5', unchanged === false);
+    } catch (err) { record('migratePitEntryV5: old routine gets strokes=[] defaulted, every existing field preserved unchanged', false, err.message); }
+
+    // Routine QR shortening round-trip: shortenRoutine/expandRoutine
+    // (reusing QR_STROKE_KEY_MAP, the same shortening match autoPathStrokes
+    // already use) and shortenPit/expandPit's routines array, lossless.
+    try {
+      const routine = { name: 'Right 2-cycle', startX: 100, startY: 30, startTile: 'E2', description: 'quick', claimedPoints: 2, reliability: 'Always',
+        strokes: [{ color: '#f0c040', width: 1.2, erase: false, pts: [[10, 20], [15.5, 25], [20, 30]] }] };
+      const shortR = shortenRoutine(routine);
+      const expandedR = expandRoutine(shortR);
+      const routineRoundTrips = JSON.stringify(expandedR) === JSON.stringify(routine);
+      const shortIsActuallyShort = JSON.stringify(shortR).length < JSON.stringify(routine).length;
+
+      const pitWithRoutines = { ...blankPit(), id: 'ct_qr_routine', teamNumber: '9951', routines: [routine, blankRoutine()] };
+      const shortP = shortenPit(pitWithRoutines);
+      const expandedP = expandPit(shortP);
+      const pitRoutinesRoundTrip = expandedP.routines.length === 2 &&
+        JSON.stringify(expandedP.routines[0]) === JSON.stringify(routine) &&
+        JSON.stringify(expandedP.routines[1].strokes) === JSON.stringify([]);
+
+      const pass = routineRoundTrips && shortIsActuallyShort && pitRoutinesRoundTrip;
+      record('Routine QR shortening: shortenRoutine/expandRoutine round-trips losslessly and is actually smaller; shortenPit/expandPit carries routines through the same way', pass,
+        JSON.stringify({ routineRoundTrips, shortIsActuallyShort, pitRoutinesRoundTrip }));
+    } catch (err) { record('Routine QR shortening: shortenRoutine/expandRoutine round-trips losslessly and is actually smaller; shortenPit/expandPit carries routines through the same way', false, err.message); }
+
+    // Pit draft restore brings routine drawings back — same restorePitFieldsUI
+    // -> renderPitRoutines() path a real reload takes, not a direct replay call.
+    try {
+      const savedPitDraft = JSON.parse(JSON.stringify(pitDraft));
+      const savedLsPitDraft = (() => { try { return localStorage.getItem(LS_PITDRAFT); } catch(e) { return null; } })();
+      const routineWithDrawing = { ...blankRoutine(), name: 'Restored routine', startX: 50, startY: 60, startTile: 'B3', strokes: [{ color: '#ffffff', width: 1, erase: false, pts: [[5, 5], [10, 10]] }] };
+      const snap = { ...blankPit(), teamNumber: '9952', routines: [routineWithDrawing] };
+      try { localStorage.setItem(LS_PITDRAFT, JSON.stringify(snap)); } catch(e) {}
+      restorePitDraftIfAny();
+      const restored = pitDraft.routines.length === 1 && pitDraft.routines[0].name === 'Restored routine' &&
+        pitDraft.routines[0].strokes.length === 1 && pitDraft.routines[0].startTile === 'B3';
+      const engineHasIt = routineSurfaces[0] && routineSurfaces[0].pCtx;
+      record('Pit draft restore brings a routine\'s drawing and start position back (same path a real reload takes)', restored && !!engineHasIt,
+        JSON.stringify({ restored, engineHasIt: !!engineHasIt }));
+
+      pitDraft = savedPitDraft;
+      try { if (savedLsPitDraft === null) localStorage.removeItem(LS_PITDRAFT); else localStorage.setItem(LS_PITDRAFT, savedLsPitDraft); } catch(e) {}
+      renderPitRoutines();
+    } catch (err) { record('Pit draft restore brings a routine\'s drawing and start position back (same path a real reload takes)', false, err.message); }
+
+    // Pit draft writes are blocked while a restore is pending, same
+    // discipline as the match draft's _draftRestorePending.
+    try {
+      const savedPending = _pitDraftRestorePending;
+      const savedLsPitDraft = (() => { try { return localStorage.getItem(LS_PITDRAFT); } catch(e) { return null; } })();
+      try { localStorage.removeItem(LS_PITDRAFT); } catch(e) {}
+      _pitDraftRestorePending = true;
+      savePitDraftAutosave();
+      const blockedWrite = (() => { try { return localStorage.getItem(LS_PITDRAFT); } catch(e) { return 'err'; } })() === null;
+      _pitDraftRestorePending = false;
+      savePitDraftAutosave();
+      const unblockedWrite = (() => { try { return localStorage.getItem(LS_PITDRAFT); } catch(e) { return null; } })() !== null;
+      record('Pit draft writes are blocked while a restore is pending, and resume once it finishes', blockedWrite && unblockedWrite, { blockedWrite, unblockedWrite });
+      _pitDraftRestorePending = savedPending;
+      try { if (savedLsPitDraft === null) localStorage.removeItem(LS_PITDRAFT); else localStorage.setItem(LS_PITDRAFT, savedLsPitDraft); } catch(e) {}
+    } catch (err) { record('Pit draft writes are blocked while a restore is pending, and resume once it finishes', false, err.message); }
+
+    // By Team / Compatibility show each routine's actual drawing (a small
+    // field canvas with its path + start square), not just "start tile ·
+    // pts" text — drawRoutineDisplayCanvases() is the shared renderer both
+    // use.
+    try {
+      const routineForDisplay = { ...blankRoutine(), name: 'Display test', startX: 72, startY: 72, startTile: 'C4', strokes: [{ color: '#00e5ff', width: 1, erase: false, pts: [[30, 30], [50, 50]] }] };
+      const html = routineRowsHtml([routineForDisplay], 'selftest-routine-display-canvas');
+      const hasCanvasPlaceholder = /canvas class="selftest-routine-display-canvas" data-ridx="0"/.test(html);
+      const host = document.createElement('div');
+      host.innerHTML = html;
+      document.body.appendChild(host);
+      drawRoutineDisplayCanvases([routineForDisplay], 'selftest-routine-display-canvas');
+      const cv = host.querySelector('canvas.selftest-routine-display-canvas');
+      const ctx = cv.getContext('2d');
+      const data = ctx.getImageData(Math.round(fieldXToPx(40) * DPR), Math.round(fieldYToPx(40) * DPR), 1, 1).data;
+      const strokeDrawn = data[3] > 0; // non-zero alpha somewhere along the drawn line
+      host.remove();
+      record('By Team / Compat: routineRowsHtml + drawRoutineDisplayCanvases render the routine\'s actual field drawing, not just text', hasCanvasPlaceholder && strokeDrawn,
+        { hasCanvasPlaceholder, strokeDrawn });
+    } catch (err) { record('By Team / Compat: routineRowsHtml + drawRoutineDisplayCanvases render the routine\'s actual field drawing, not just text', false, err.message); }
+
     // Scouter self-reset (Me sheet link): routes to the blocked screen
     // with unsent entries, the confirm screen (with the self-reset's own
     // itemized message, not the Reset QR's "lead wants to..." one) with
@@ -9048,11 +9417,11 @@ async function runSelfTests() {
     try { if (snapshot.lsDraft !== null) localStorage.setItem(LS_DRAFT, snapshot.lsDraft); else localStorage.removeItem(LS_DRAFT); } catch (e) {}
     try { if (snapshot.lsPitDraft !== null) localStorage.setItem(LS_PITDRAFT, snapshot.lsPitDraft); else localStorage.removeItem(LS_PITDRAFT); } catch (e) {}
     try { if (snapshot.draftInk) await idbPutImage(DRAFT_INK_ID, snapshot.draftInk); else await idbDeleteImage(DRAFT_INK_ID); } catch (e) {}
-    if (_pCtx) {
-      if (snapshot.inkCanvasData) _pCtx.putImageData(snapshot.inkCanvasData, 0, 0);
-      else _pCtx.clearRect(0, 0, PATH_W, PATH_H);
+    if (matchSurface && matchSurface.pCtx) {
+      if (snapshot.inkCanvasData) matchSurface.pCtx.putImageData(snapshot.inkCanvasData, 0, 0);
+      else matchSurface.pCtx.clearRect(0, 0, PATH_W, PATH_H);
     }
-    _inkTouched = snapshot.inkTouched;
+    if (matchSurface) matchSurface.inkTouched = snapshot.inkTouched;
     _matchesLoadFailed = snapshot.matchesLoadFailed;
     pickList = snapshot.pickList;
     allianceSize = snapshot.allianceSize;
