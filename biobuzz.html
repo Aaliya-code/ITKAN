@@ -388,7 +388,6 @@
   .draft-banner button {
     border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer;
   }
-  .draft-banner .db-continue { background: #16181f; color: var(--yellow); }
   .draft-banner .db-discard { background: rgba(22,24,31,.2); color: #16181f; }
 
   /* ── DUPLICATE FLAG ── */
@@ -659,9 +658,8 @@
 
 <div class="save-error" id="saveError">⚠ NOT SAVED — tell your lead scout</div>
 <div class="draft-banner" id="draftBanner">
-  <span>Restored unsaved match</span>
+  <span>Restored your unsaved match</span>
   <div class="db-actions">
-    <button class="db-continue" id="draftContinueBtn">Continue</button>
     <button class="db-discard" id="draftDiscardBtn">Discard</button>
   </div>
 </div>
@@ -1887,8 +1885,14 @@ const blankPit = () => ({
 });
 let pitDraft = blankPit();
 
+// Deliberately does NOT look at matchType/matchNumber/teamNumber/alliance/
+// scouter/event fields: those get auto-filled for the next scheduled match
+// right after every save (see applyAutoFill), so counting them here would
+// make draftHasData() true for a brand new, otherwise-untouched draft —
+// showing a restore banner for a "match" with nothing actually in it. Only
+// fields a scouter had to deliberately act on count as real, unsaved work.
 function draftHasData(d) {
-  return !!(d.matchType || d.matchNumber || d.teamNumber || d.alliance || d.notes ||
+  return !!(d.notes ||
     d.leave || d.autoPark || d.teleopPark ||
     Number(d.autoHiveMade) || Number(d.teleopHiveMade) || Number(d.teleopFlowerMade) || Number(d.ownGarden) ||
     Number(d.autoTips) || Number(d.teleopTips) ||
@@ -2574,7 +2578,21 @@ async function performActualSave() {
 /* ══════════ DRAFT AUTOSAVE (match) ══════════ */
 const DRAFT_INK_ID = '__draft_ink__';
 let _draftSaveTimer = null;
+// True from page load until checkDraftRestore() finishes deciding whether
+// there's a saved draft to bring back. A real device's startup sequence —
+// init() reads a saved draft, THEN runs maybeAutoFillSetup() for the next
+// scheduled match — used to race: auto-fill ran on the still-blank `draft`
+// (restore hadn't applied it yet) and wrote that blank, auto-filled draft
+// over the real saved one 150ms later. Backgrounding/closing the app before
+// the user acted on the old "Continue" banner hit the exact same race via
+// flushDraftAutosave's visibilitychange/pagehide handlers. Blocking every
+// write (debounced, flushed, or ink) until the restore decision is actually
+// made closes both paths — see checkDraftRestore(), which is also why
+// restoring is no longer a "Continue" button: it happens automatically,
+// before anything else gets a chance to touch the draft.
+let _draftRestorePending = true;
 function saveDraftAutosave() {
+  if (_draftRestorePending) return;
   clearTimeout(_draftSaveTimer);
   _draftSaveTimer = setTimeout(flushDraftAutosave, 150);
 }
@@ -2589,6 +2607,7 @@ function saveDraftAutosave() {
 // synchronously the instant the page is hidden/closed so nothing is ever
 // mid-flight when that happens.
 function flushDraftAutosave() {
+  if (_draftRestorePending) return;
   clearTimeout(_draftSaveTimer);
   _draftSaveTimer = null;
   try {
@@ -2605,7 +2624,19 @@ function clearDraftAutosave() {
   idbDeleteImage(DRAFT_INK_ID).catch(() => {});
 }
 async function saveInkAutosave() {
+  if (_draftRestorePending) return;
   try {
+    // An ink PNG written while the canvas is actually blank (every stroke
+    // undone/cleared back to nothing) would make checkDraftRestore()'s
+    // `hasInk` check true on the next load even though there's no real
+    // drawing and draftHasData() correctly says there's nothing to restore
+    // — the device would show a "restored" match with nothing in it.
+    // Deleting instead of writing a blank PNG keeps `hasInk` meaning what
+    // it says: there is an actual drawing to bring back.
+    if (!Array.isArray(draft.autoPathStrokes) || draft.autoPathStrokes.length === 0) {
+      await idbDeleteImage(DRAFT_INK_ID);
+      return;
+    }
     const ink = document.getElementById('auto-path-canvas');
     if (ink) await idbPutImage(DRAFT_INK_ID, ink.toDataURL('image/png'));
   } catch (err) {
@@ -2613,26 +2644,36 @@ async function saveInkAutosave() {
   }
 }
 
+// Restores automatically — no "Continue" step — specifically so nothing
+// else in startup gets a window where a stale/blank `draft` sits around
+// waiting for a tap that might never come before something else (auto-fill,
+// a background/close) overwrites the real saved data. See
+// _draftRestorePending above.
 async function checkDraftRestore() {
-  let raw;
-  try { raw = localStorage.getItem(LS_DRAFT); } catch (e) { raw = null; }
-  let hasInk = false;
-  try { hasInk = !!(await idbGetImage(DRAFT_INK_ID)); } catch (e) { hasInk = false; }
-  let snap = {};
-  if (raw) {
-    try { snap = JSON.parse(raw); } catch (e) { try { localStorage.removeItem(LS_DRAFT); } catch(e2){} snap = {}; }
+  try {
+    let raw;
+    try { raw = localStorage.getItem(LS_DRAFT); } catch (e) { raw = null; }
+    let hasInk = false;
+    try { hasInk = !!(await idbGetImage(DRAFT_INK_ID)); } catch (e) { hasInk = false; }
+    let snap = {};
+    if (raw) {
+      try { snap = JSON.parse(raw); } catch (e) { try { localStorage.removeItem(LS_DRAFT); } catch(e2){} snap = {}; }
+    }
+    // A drawing-only draft (no other field touched) still counts as unsaved work.
+    if (!draftHasData(snap) && !hasInk) { try { localStorage.removeItem(LS_DRAFT); } catch(e){} return; }
+    await applyDraftSnapshot(snap);
+    showDraftBanner();
+  } finally {
+    _draftRestorePending = false;
   }
-  // A drawing-only draft (no other field touched) still counts as unsaved work.
-  if (!draftHasData(snap) && !hasInk) { try { localStorage.removeItem(LS_DRAFT); } catch(e){} return; }
-  showDraftBanner(snap);
 }
-function showDraftBanner(snap) {
+function showDraftBanner() {
   const banner = document.getElementById('draftBanner');
   banner.style.display = 'flex';
   window.scrollTo({ top: 0 });
-  document.getElementById('draftContinueBtn').onclick = () => applyDraftSnapshot(snap);
   document.getElementById('draftDiscardBtn').onclick = () => {
     clearDraftAutosave();
+    resetScoutForm(); // clears the just-restored draft and runs auto-fill for the next match, same as discarding any other time
     banner.style.display = 'none';
   };
 }
@@ -2702,8 +2743,6 @@ async function applyDraftSnapshot(snap) {
   // possibly wrong-size, if DPR differs) prior snapshot.
   _pUndo = [];
   _strokeUndo = [];
-  document.getElementById('draftBanner').style.display = 'none';
-  showToast('Draft restored');
 }
 
 window.addEventListener('beforeunload', (e) => {
@@ -4184,7 +4223,10 @@ function _pEnd() {
       enforceStrokeCap();
     }
     saveInkAutosave();
-    saveDraftAutosave();
+    // Flushed immediately, not debounced: the stroke list is what a restore
+    // prefers over the ink PNG (see applyDraftSnapshot), so it has to land
+    // in storage as reliably and promptly as the ink itself does.
+    flushDraftAutosave();
   }
   _pDrawing = false;
 }
@@ -4194,7 +4236,7 @@ function undoAutoPath() {
   _pCtx.putImageData(_pUndo.pop(), 0, 0);
   if (_strokeUndo.length) draft.autoPathStrokes = _strokeUndo.pop();
   saveInkAutosave();
-  saveDraftAutosave();
+  flushDraftAutosave();
 }
 function clearAutoPath() {
   if (!_pCtx) return;
@@ -4206,7 +4248,7 @@ function clearAutoPath() {
   draft.autoPathStrokes = [];
   _inkTouched = false;
   saveInkAutosave();
-  saveDraftAutosave();
+  flushDraftAutosave();
 }
 
 // Cap total stored points across all of this entry's strokes (~400) by
@@ -6864,16 +6906,99 @@ async function runSelfTests() {
       record('save failure shows persistent banner, returns false', ok === false && bannerVisible);
     } catch (err) { record('save failure shows persistent banner, returns false', false, err.message); }
 
-    // 4. draft restore
+    // 4. draft restore now applies automatically (no "Continue" step — see
+    // _draftRestorePending) and shows a Discard-only banner.
     try {
+      const savedDraftObj = draft;
       const snap = { matchType: 'Qualification', matchNumber: '99', teamNumber: '9999', alliance: 'blue', notes: 'selftest' };
       localStorage.setItem(LS_DRAFT, JSON.stringify(snap));
       document.getElementById('draftBanner').style.display = 'none';
+      draft = blankDraft();
       await checkDraftRestore();
       const bannerShown = document.getElementById('draftBanner').style.display === 'flex';
-      record('draft restore shows banner for unsaved match', bannerShown);
+      const restored = draft.teamNumber === '9999' && draft.notes === 'selftest';
+      const continueBtnGone = !document.getElementById('draftContinueBtn');
+      record('draft restore applies automatically and shows a Discard-only banner', bannerShown && restored && continueBtnGone,
+        { bannerShown, restored, continueBtnGone });
       document.getElementById('draftDiscardBtn').click();
-    } catch (err) { record('draft restore shows banner for unsaved match', false, err.message); }
+      draft = savedDraftObj;
+    } catch (err) { record('draft restore applies automatically and shows a Discard-only banner', false, err.message); }
+
+    // 4b. draftHasData() must ignore auto-filled match info (matchType/
+    // matchNumber/teamNumber/alliance) — those get set for the next
+    // scheduled match right after every save, and counting them made every
+    // post-save draft look like unsaved work to restore.
+    try {
+      const autoFilledOnly = { matchType: 'Qualification', matchNumber: '12', teamNumber: '1234', alliance: 'red' };
+      const withRealData = { ...autoFilledOnly, notes: 'actually scouted' };
+      const pass = draftHasData(autoFilledOnly) === false && draftHasData(withRealData) === true;
+      record('draftHasData() ignores auto-filled match info but still counts real scouting input', pass,
+        { autoFilledOnly: draftHasData(autoFilledOnly), withRealData: draftHasData(withRealData) });
+    } catch (err) { record('draftHasData() ignores auto-filled match info but still counts real scouting input', false, err.message); }
+
+    // 4c. saveInkAutosave() must delete the ink key (not write a blank PNG)
+    // when there are no strokes, so a cleared/undone-to-nothing path never
+    // makes checkDraftRestore()'s hasInk check true for a drawing that isn't
+    // actually there.
+    try {
+      const savedStrokes = draft.autoPathStrokes;
+      const savedInk = await idbGetImage(DRAFT_INK_ID).catch(() => null);
+      draft.autoPathStrokes = [];
+      await saveInkAutosave();
+      const afterBlank = await idbGetImage(DRAFT_INK_ID).catch(() => null);
+      draft.autoPathStrokes = [{ color: '#fff', width: 1, erase: false, pts: [[0, 0], [1, 1]] }];
+      await saveInkAutosave();
+      const afterReal = await idbGetImage(DRAFT_INK_ID).catch(() => null);
+      const pass = afterBlank === null && !!afterReal;
+      record('saveInkAutosave() deletes the ink key when there are no strokes, never persists a blank PNG as "has a drawing"', pass,
+        { afterBlankIsNull: afterBlank === null, afterRealPresent: !!afterReal });
+      if (savedInk) await idbPutImage(DRAFT_INK_ID, savedInk); else await idbDeleteImage(DRAFT_INK_ID);
+      draft.autoPathStrokes = savedStrokes;
+    } catch (err) { record('saveInkAutosave() deletes the ink key when there are no strokes, never persists a blank PNG as "has a drawing"', false, err.message); }
+
+    // 4d. Draft writes are blocked while a restore decision is still
+    // pending, and resume once it's made — the guard behind fix #1.
+    try {
+      const savedPending = _draftRestorePending;
+      const savedRaw = localStorage.getItem(LS_DRAFT);
+      localStorage.removeItem(LS_DRAFT);
+      _draftRestorePending = true;
+      flushDraftAutosave();
+      const blockedWrite = localStorage.getItem(LS_DRAFT) === null;
+      _draftRestorePending = false;
+      flushDraftAutosave();
+      const unblockedWrite = localStorage.getItem(LS_DRAFT) !== null;
+      const pass = blockedWrite && unblockedWrite;
+      record('Draft writes are blocked while a restore is pending, and resume once it finishes', pass, { blockedWrite, unblockedWrite });
+      if (savedRaw === null) localStorage.removeItem(LS_DRAFT); else localStorage.setItem(LS_DRAFT, savedRaw);
+      _draftRestorePending = savedPending;
+    } catch (err) { record('Draft writes are blocked while a restore is pending, and resume once it finishes', false, err.message); }
+
+    // 4e. End-to-end regression for the real startup race: a saved draft in
+    // storage must survive checkDraftRestore() followed immediately by
+    // maybeAutoFillSetup() (init()'s actual order) without being clobbered
+    // by auto-fill running on a still-blank draft.
+    try {
+      const savedDraftObj = draft;
+      const savedLsRaw = localStorage.getItem(LS_DRAFT);
+      const savedSchedule = schedule;
+      const snap = { matchType: 'Qualification', matchNumber: '50', teamNumber: '5050', alliance: 'red', autoHiveMade: 2, startX: 10, startY: 10, startTile: 'A1', notes: '' };
+      localStorage.setItem(LS_DRAFT, JSON.stringify(snap));
+      document.getElementById('draftBanner').style.display = 'none';
+      draft = blankDraft(); // the in-memory draft is still blank, exactly as at real startup before the restore runs
+      schedule = [{ matchType: 'Qualification', matchNumber: '51', station, teamNumber: '6060' }]; // something auto-fill could grab if it ran first
+      await checkDraftRestore();
+      maybeAutoFillSetup();
+      await new Promise(r => setTimeout(r, 200));
+      const stillHasRealData = draft.teamNumber === '5050' && draft.autoHiveMade === 2 && draft.startTile === 'A1';
+      const lsStillHasRealData = JSON.parse(localStorage.getItem(LS_DRAFT) || 'null')?.teamNumber === '5050';
+      record('Startup restore runs before auto-fill, so a real saved draft is never overwritten with a blank/auto-filled one', stillHasRealData && lsStillHasRealData,
+        { stillHasRealData, lsStillHasRealData });
+      document.getElementById('draftDiscardBtn').click();
+      draft = savedDraftObj;
+      schedule = savedSchedule;
+      if (savedLsRaw === null) localStorage.removeItem(LS_DRAFT); else localStorage.setItem(LS_DRAFT, savedLsRaw);
+    } catch (err) { record('Startup restore runs before auto-fill, so a real saved draft is never overwritten with a blank/auto-filled one', false, err.message); }
 
     // 5. import dedupe
     try {
