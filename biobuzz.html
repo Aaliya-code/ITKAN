@@ -1180,9 +1180,10 @@
     </div>
     <div class="card">
       <div class="card-title">Scouter Setup</div>
-      <div class="hint">One QR code gets a scouter device fully set up offline: event info, team list, and the match schedule below. Re-show it any time the schedule changes — re-importing replaces the schedule but never touches a scouter's saved entries.</div>
+      <div class="hint">One QR code gets a scouter device fully set up offline: event info, team list, the match schedule below, and the scouter roster. Re-show it any time the schedule or roster changes — re-importing replaces them but never touches a scouter's saved entries.</div>
       <div class="btn-row">
         <button class="btn btn-primary" id="showSetupQrBtn">Show Setup QR</button>
+        <button class="btn btn-secondary" id="openScoutersBtn">Scouters</button>
       </div>
     </div>
     <div class="card">
@@ -1339,6 +1340,10 @@
       </div>
     </div>
   </div>
+  <div class="card" id="meAccountCard" style="display:none;">
+    <div class="hint" id="meAccountHint"></div>
+    <button class="btn btn-secondary" id="meSwitchScouterBtn" style="width:100%;">Switch Scouter</button>
+  </div>
   <div class="card">
     <div class="card-title">My Saved Entries</div>
     <div id="meSavedEntriesList"></div>
@@ -1358,11 +1363,54 @@
 <div class="review-overlay" id="whoAreYouOverlay" style="display:none;">
   <div class="team-banner-slot"></div>
   <h2 class="section-title">Who are you?</h2>
-  <div class="card">
+  <!-- Legacy free-text mode: shown only on a device whose roster is still
+       empty (no Setup QR with a roster has ever been scanned here) —
+       unchanged from before accounts existed. -->
+  <div class="card" id="wayLegacyCard" style="display:none;">
     <div class="field">
       <label>Your Name</label>
       <input type="text" id="way-scouterName" placeholder="Your name" autocomplete="name" enterkeyhint="done" />
     </div>
+    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayLegacyGoSignupLink">Set up a scouter account instead</a></div>
+  </div>
+  <!-- Sign-in mode: pick an approved account, enter its PIN. -->
+  <div class="card" id="waySignInCard" style="display:none;">
+    <div class="field">
+      <label>Your Name</label>
+      <select id="waySignInSelect"></select>
+    </div>
+    <div class="field">
+      <label id="waySignInPinLabel">PIN</label>
+      <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="waySignInPin" style="font-size:24px;text-align:center;letter-spacing:10px;" placeholder="····" />
+    </div>
+    <div class="hint" id="waySignInHint"></div>
+    <button class="btn btn-primary" id="waySignInBtn" style="width:100%;">Sign In</button>
+    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayGoSignupLink">New here? Create an account</a></div>
+    <div class="hint" style="text-align:center;margin-top:6px;"><a href="#" id="wayNotNowLink">Not now — I just need to send/reset</a></div>
+  </div>
+  <!-- Sign-up mode: create a brand-new pending account on this device. -->
+  <div class="card" id="waySignUpCard" style="display:none;">
+    <div class="field">
+      <label>Your Name</label>
+      <input type="text" id="waySignUpName" placeholder="Your name" autocomplete="name" enterkeyhint="done" />
+    </div>
+    <div class="field">
+      <label>Create a 4-digit PIN</label>
+      <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="waySignUpPin" style="font-size:24px;text-align:center;letter-spacing:10px;" placeholder="····" />
+    </div>
+    <div class="hint" id="waySignUpHint"></div>
+    <button class="btn btn-primary" id="waySignUpBtn" style="width:100%;">Create Account</button>
+    <div class="hint" style="text-align:center;margin-top:10px;" id="wayGoSignInWrap"><a href="#" id="wayGoSignInLink">Already have an account? Sign in</a></div>
+  </div>
+  <!-- Pending: account created, waiting on the lead to scan the Join QR
+       (Export > Scan QR) and tap Approve. Scouting stays blocked. -->
+  <div class="card" id="wayPendingCard" style="display:none;text-align:center;">
+    <div class="hint">Waiting for lead approval…</div>
+    <img id="wayJoinQrImage" style="width:auto;height:auto;max-width:100%;border-radius:8px;background:#fff;padding:12px;image-rendering:pixelated;margin-top:8px;" />
+    <div class="hint" style="margin-top:8px;">Show this QR to your lead.</div>
+    <button class="btn btn-secondary" id="wayPendingCancelBtn" style="margin-top:10px;">Cancel signup</button>
+  </div>
+  <div class="card" id="wayStationCard" style="display:none;">
     <div class="field">
       <label>Station</label>
       <div class="seg-row" id="wayStationRow">
@@ -1373,8 +1421,31 @@
       </div>
     </div>
   </div>
-  <div class="review-actions">
+  <div class="review-actions" id="wayDoneRow" style="display:none;">
     <button class="btn btn-primary" id="wayDoneBtn">Done</button>
+  </div>
+</div>
+
+<div class="review-overlay" id="scoutersOverlay" style="display:none;">
+  <h2 class="section-title">Scouters</h2>
+  <div class="card">
+    <button class="btn btn-secondary" id="addScouterDirectlyBtn" style="width:100%;">+ Add Scouter</button>
+    <div class="hint" style="margin-top:6px;">Creates an approved account with no PIN yet — the student picks their name and sets a PIN the first time they sign in on a device.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Pending (<span id="scoutersPendingCount">0</span>)</div>
+    <div id="scoutersPendingList"><div class="empty-state">No pending requests.</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Active (<span id="scoutersActiveCount">0</span>)</div>
+    <div id="scoutersActiveList"><div class="empty-state">No active scouters yet.</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Deactivated (<span id="scoutersDeactivatedCount">0</span>)</div>
+    <div id="scoutersDeactivatedList"><div class="empty-state">None.</div></div>
+  </div>
+  <div class="review-actions">
+    <button class="btn btn-secondary" id="scoutersCloseBtn">Close</button>
   </div>
 </div>
 
@@ -1806,7 +1877,20 @@ function migrateV6ToV7(m) {
   return true;
 }
 
-// Full v1->...->v7 pipeline for one match entry — used by both the on-load
+// v7 -> v8: scouter accounts. An entry with no scouterId/deviceId is a
+// pre-accounts (or an accounts-never-adopted-on-that-device) entry — the
+// task is explicit that these are never rejected or flagged, just treated
+// as having no account to check, everywhere this is read (receive checks,
+// the Scouters screen's entry counts).
+function migrateV7ToV8(m) {
+  if (m.schemaVersion >= 8) return false;
+  if (m.scouterId === undefined) m.scouterId = '';
+  if (m.deviceId === undefined) m.deviceId = '';
+  m.schemaVersion = 8;
+  return true;
+}
+
+// Full v1->...->v8 pipeline for one match entry — used by both the on-load
 // migration and backup/QR import (so an old backup gets upgraded the same
 // way).
 async function migrateEntryFull(m) {
@@ -1817,6 +1901,7 @@ async function migrateEntryFull(m) {
   if (migrateV4ToV5(m)) changed = true;
   if (migrateV5ToV6(m)) changed = true;
   if (migrateV6ToV7(m)) changed = true;
+  if (migrateV7ToV8(m)) changed = true;
   return changed;
 }
 
@@ -1886,12 +1971,21 @@ function migratePitEntryV5(p) {
   p.schemaVersion = 5;
   return true;
 }
+// v5 -> v6: scouter accounts, same meaning as the match entries' v7->v8.
+function migratePitEntryV6(p) {
+  if (p.schemaVersion >= 6) return false;
+  if (p.scouterId === undefined) p.scouterId = '';
+  if (p.deviceId === undefined) p.deviceId = '';
+  p.schemaVersion = 6;
+  return true;
+}
 async function migratePitEntryFull(p) {
   let changed = false;
   if (await migratePitEntry(p)) changed = true;
   if (migratePitEntryV3(p)) changed = true;
   if (migratePitEntryV4(p)) changed = true;
   if (migratePitEntryV5(p)) changed = true;
+  if (migratePitEntryV6(p)) changed = true;
   return changed;
 }
 async function runMigration() {
@@ -2605,16 +2699,32 @@ document.getElementById('saveMatchBtn').addEventListener('click', () => {
 
 // The only place a match entry is actually written — new or edited.
 async function performActualSave() {
+  // "Scouting is blocked until approved" / blocked after a deactivation:
+  // once the account system is in use on a SCOUTER device (a non-empty
+  // roster), a save requires an actual signed-in session. A legacy device
+  // (empty roster) is completely unaffected, and this never applies to
+  // the lead (editing a match from Data > Matches reuses this same
+  // function but has nothing to do with the scouter-account session).
+  if (deviceRole !== 'lead' && roster.accounts.length > 0 && !currentSession) {
+    showToast('Sign in first (tap Me) before saving a match entry', true);
+    return;
+  }
   try {
     const oldEntry = editingId ? matches.find(m => String(m.id) === String(editingId)) : null;
     const autoPathId = await captureAutoPathImage();
     const now = new Date().toISOString();
     let savedEntry, next;
     if (editingId) {
-      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 7, id: editingId, ts: oldEntry ? oldEntry.ts : now, updatedAt: now, sent: false };
+      // Editing never reassigns authorship — scouterId/deviceId stay
+      // whatever the entry already had, same as scouter (the free-text
+      // name) already does via draft's spread from the entry being edited.
+      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 8, id: editingId, ts: oldEntry ? oldEntry.ts : now, updatedAt: now, sent: false,
+        scouterId: oldEntry ? (oldEntry.scouterId || '') : (currentSession ? currentSession.scouterId : ''),
+        deviceId: oldEntry ? (oldEntry.deviceId || '') : (currentSession ? deviceId : '') };
       next = matches.map(m => String(m.id) === String(editingId) ? savedEntry : m);
     } else {
-      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 7, id: newEntryId(), ts: now, updatedAt: now, sent: false };
+      savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 8, id: newEntryId(), ts: now, updatedAt: now, sent: false,
+        scouterId: currentSession ? currentSession.scouterId : '', deviceId: currentSession ? deviceId : '' };
       next = [...matches, savedEntry];
     }
     const ok = save(LS_MATCHES, next);
@@ -3270,15 +3380,25 @@ document.getElementById('savePitBtn').addEventListener('click', async () => {
     showToast('Team # is required', true);
     return;
   }
+  if (deviceRole !== 'lead' && roster.accounts.length > 0 && !currentSession) {
+    showToast('Sign in first (tap Me) before saving a pit entry', true);
+    return;
+  }
   try {
     const now = new Date().toISOString();
     let entry, next;
+    // Same as scouter (the free-text name) above: pit entries always
+    // re-stamp to whoever's currently signed in, edit or not — matching
+    // the existing scouter-name behavior rather than introducing a
+    // preserve-on-edit rule match entries have but pit entries never did.
+    const tagScouterId = currentSession ? currentSession.scouterId : '';
+    const tagDeviceId = currentSession ? deviceId : '';
     if (editingPitId) {
       const old = pits.find(p => String(p.id) === String(editingPitId));
-      entry = { ...pitDraft, schemaVersion: 5, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 6, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, scouterId: tagScouterId, deviceId: tagDeviceId, sent: false };
       next = pits.map(p => String(p.id) === String(editingPitId) ? entry : p);
     } else {
-      entry = { ...pitDraft, schemaVersion: 5, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, sent: false };
+      entry = { ...pitDraft, schemaVersion: 6, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, scouterId: tagScouterId, deviceId: tagDeviceId, sent: false };
       next = [...pits, entry];
     }
     const ok = save(LS_PIT, next);
@@ -3996,7 +4116,7 @@ function toCsv(rows, headers) {
 document.getElementById('exportMatchCsv').addEventListener('click', () => {
   if (!matches.length) return showToast('No match data to export', true);
   const headers = [
-    'matchType','matchNumber','eventCode','teamNumber','alliance','scouter',
+    'matchType','matchNumber','eventCode','teamNumber','alliance','scouter','scouterId',
     'leave','autoPark','teleopPark',
     'startTile','startX','startY',
     'autoHiveMade','teleopHiveMade','teleopFlowerMade','ownGarden',
@@ -4111,7 +4231,7 @@ async function buildFullBackup() {
       if (u) images[id] = u;
     }
   }
-  return { matches, pits, images, schedule, eventData, exportedAt: new Date().toISOString() };
+  return { matches, pits, images, schedule, eventData, roster, exportedAt: new Date().toISOString() };
 }
 document.getElementById('exportJson').addEventListener('click', async () => {
   try {
@@ -4158,6 +4278,66 @@ document.getElementById('backupNowBtn').addEventListener('click', async () => {
   }
 });
 
+// The ONE lead receive-check path — called from BOTH QR import
+// (handleImportPart) and full-backup restore (mergeImportedData), always
+// right before mergeEntriesByUpdatedAt(), never reimplemented per screen.
+// An entry with no scouterId (legacy, or accounts never adopted on that
+// device) always passes through unchecked — never rejected or flagged,
+// per the migration rule. Otherwise: a deactivated or unknown scouterId is
+// grouped by scouterId and asked about ONCE per batch ("Import anyway" /
+// Skip, via confirm()), not once per entry — unless the entry's own
+// timestamp predates the account's deactivatedAt, meaning it was scouted
+// BEFORE the deactivation and is just arriving late, which always passes.
+// Same idea for a device mismatch against movedAt. A same-batch entry from
+// an account's SECOND distinct device is a separate, non-blocking warning.
+function checkReceivedEntries(incoming) {
+  const allowed = [];
+  const flagged = new Map(); // "scouterId|reason" -> entries[]
+  for (const e of incoming) {
+    if (!e.scouterId) { allowed.push(e); continue; }
+    const acct = findAccount(e.scouterId);
+    const stamp = e.updatedAt || e.ts || '';
+    if (!acct || acct.status === 'deactivated') {
+      if (acct && acct.deactivatedAt && stamp && stamp < acct.deactivatedAt) { allowed.push(e); continue; }
+      const key = e.scouterId + '|deactivated';
+      if (!flagged.has(key)) flagged.set(key, []);
+      flagged.get(key).push(e);
+      continue;
+    }
+    if (e.deviceId && acct.boundDeviceId && e.deviceId !== acct.boundDeviceId) {
+      if (acct.movedAt && stamp && stamp < acct.movedAt) { allowed.push(e); continue; }
+      const key = e.scouterId + '|devicemismatch';
+      if (!flagged.has(key)) flagged.set(key, []);
+      flagged.get(key).push(e);
+      continue;
+    }
+    allowed.push(e);
+  }
+  for (const [key, entries] of flagged) {
+    const [scouterId, reason] = key.split('|');
+    const acct = findAccount(scouterId);
+    const name = (acct && acct.name) || entries[0].scouter || scouterId;
+    const n = entries.length;
+    const prompt = reason === 'deactivated'
+      ? `${n} ${n === 1 ? 'entry' : 'entries'} from deactivated/unknown scouter ${name} — Import anyway?`
+      : `${n} ${n === 1 ? 'entry' : 'entries'} for ${name} from an unrecognized device — Import anyway?`;
+    if (confirm(prompt)) allowed.push(...entries);
+  }
+  const devicesSeen = new Map();
+  incoming.forEach(e => {
+    if (!e.scouterId || !e.deviceId) return;
+    if (!devicesSeen.has(e.scouterId)) devicesSeen.set(e.scouterId, new Set());
+    devicesSeen.get(e.scouterId).add(e.deviceId);
+  });
+  devicesSeen.forEach((devices, scouterId) => {
+    if (devices.size > 1) {
+      const acct = findAccount(scouterId);
+      showToast(`⚠ ${(acct && acct.name) || scouterId}'s entries arrived from ${devices.size} different devices in this sync`, true);
+    }
+  });
+  return allowed;
+}
+
 // Shared by the real import handler and the ?test=1 self-test. Ids are
 // compared as strings so e.g. 123 and "123" dedupe as the same entry.
 // Shared updatedAt-based merge (task 6, Phase 4): when an incoming entry's
@@ -4196,13 +4376,13 @@ async function mergeImportedData(data) {
 
   if (Array.isArray(data.matches)) {
     for (const m of data.matches) await migrateEntryFull(m); // handles legacy (v1-v4) backups too, and stamps updatedAt
-    const r = mergeEntriesByUpdatedAt(matches, data.matches);
+    const r = mergeEntriesByUpdatedAt(matches, checkReceivedEntries(data.matches));
     matches = r.merged;
     newM = r.added; updM = r.updated; dupM = r.skipped;
   }
   if (Array.isArray(data.pits)) {
     for (const p of data.pits) await migratePitEntryFull(p);
-    const r = mergeEntriesByUpdatedAt(pits, data.pits);
+    const r = mergeEntriesByUpdatedAt(pits, checkReceivedEntries(data.pits));
     pits = r.merged;
     newP = r.added; updP = r.updated; dupP = r.skipped;
   }
@@ -4217,6 +4397,15 @@ async function mergeImportedData(data) {
   if (data.eventData && typeof data.eventData === 'object') {
     eventData = { ...blankEventData(), ...data.eventData };
     saveEventData();
+  }
+  // The roster backup/restores wholesale (same "higher version wins" rule
+  // as Setup QR) — unlike Setup QR's roster field, a full backup carries
+  // the LEAD's complete roster including pending accounts, since it's a
+  // full snapshot meant to restore a lead device, not distribute to a
+  // scouter device.
+  if (data.roster && typeof data.roster === 'object' && Array.isArray(data.roster.accounts) && typeof data.roster.version === 'number' && data.roster.version > roster.version) {
+    roster = data.roster;
+    saveRoster();
   }
 
   return { newM, updM, dupM, newP, updP, dupP };
@@ -5216,14 +5405,277 @@ document.getElementById('pinInput').addEventListener('keydown', e => {
   titleEl.addEventListener('contextmenu', e => e.preventDefault());
 })();
 
+/* ══════════ SCOUTER ACCOUNTS (lead-approval, one session per account) ══════════
+   Core data model + shared functions, used identically by every screen
+   that touches accounts (Who-Are-You, the Scouters screen, Setup QR
+   import, Join QR import, the lead's Scan QR receive path) — root-cause
+   rule: approve/deny/deactivate/reactivate/rename/resetPin/move/add-direct
+   all live here ONCE, not reimplemented per screen.
+
+   Rollback-friendly-by-design for a future "lead creates every account"
+   variant: addScouterDirectly() already creates an account with no PIN and
+   no bound device — signInWithAccount() below already has a "claim this
+   still-PIN-less account" branch that's IDENTICAL to what a lead-only
+   onboarding flow would need, so switching to that variant later only
+   means skipping the Join-QR/pending/approve step entirely, not writing a
+   new account/session/receive-check path.
+
+   Device identity: a stable random id, created once and kept in
+   localStorage until Reset this device (wipeDeviceCompletely() sweeps
+   every biobuzz2026_-prefixed key, including this one, so a reset device
+   always gets a FRESH id next boot — the lead then has to explicitly Move
+   the reset device's account, which is deliberate: it closes the
+   "reset to dodge the one-device rule" loophole the task called out). */
+const LS_DEVICE_ID = 'biobuzz2026_deviceid';
+const LS_ROSTER = 'biobuzz2026_roster';
+const LS_SESSION = 'biobuzz2026_session';
+const LS_MY_PENDING_SIGNUP = 'biobuzz2026_mypendingsignup';
+function genShortId() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+function loadOrCreateDeviceId() {
+  try {
+    let v = localStorage.getItem(LS_DEVICE_ID);
+    if (!v) { v = genShortId(); localStorage.setItem(LS_DEVICE_ID, v); }
+    return v;
+  } catch (e) { return genShortId(); }
+}
+let deviceId = loadOrCreateDeviceId();
+function loadRoster() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_ROSTER));
+    if (v && typeof v === 'object' && Array.isArray(v.accounts) && typeof v.version === 'number') return v;
+  } catch (e) {}
+  return { version: 0, accounts: [] };
+}
+let roster = loadRoster();
+function saveRoster() { try { localStorage.setItem(LS_ROSTER, JSON.stringify(roster)); } catch (e) {} }
+function bumpRosterVersion() { roster.version = (roster.version || 0) + 1; saveRoster(); }
+function findAccount(scouterId) { return roster.accounts.find(a => a.scouterId === scouterId) || null; }
+
+let currentSession = (() => { try { return JSON.parse(localStorage.getItem(LS_SESSION)) || null; } catch (e) { return null; } })();
+function saveSession() { try { if (currentSession) localStorage.setItem(LS_SESSION, JSON.stringify(currentSession)); else localStorage.removeItem(LS_SESSION); } catch (e) {} }
+let myPendingSignup = (() => { try { return JSON.parse(localStorage.getItem(LS_MY_PENDING_SIGNUP)) || null; } catch (e) { return null; } })();
+function saveMyPendingSignup() { try { if (myPendingSignup) localStorage.setItem(LS_MY_PENDING_SIGNUP, JSON.stringify(myPendingSignup)); else localStorage.removeItem(LS_MY_PENDING_SIGNUP); } catch (e) {} }
+
+// Salted via the account's own scouterId (unique per account, already
+// transmitted alongside the hash anyway) plus a fixed app-specific prefix —
+// two accounts that happen to pick the same PIN never hash the same, and
+// the hash alone (without knowing this scheme) isn't a bare unsalted
+// SHA-256(pin) lookup target. This is a scouting app's PIN, not a banking
+// credential; the goal is "never store/transmit the PIN itself," which
+// this meets, not defense against a targeted attacker.
+async function hashScouterPin(scouterId, pin) { return sha256Hex('biobuzz-scouter-pin:' + scouterId + ':' + pin); }
+
+function beginSession(scouterId, name) {
+  currentSession = { scouterId, name };
+  saveSession();
+  persistedScouter = name;
+  try { localStorage.setItem(LS_SCOUTER, persistedScouter); } catch (e) {}
+  document.getElementById('s-scouterName').value = persistedScouter;
+  document.getElementById('me-scouterName').value = persistedScouter;
+}
+function endSession() { currentSession = null; saveSession(); }
+
+// Called after every roster merge (Setup QR, backup restore). Two
+// INDEPENDENT checks — deliberately not nested under one guard, since a
+// device can have a pending signup with NO session yet (the common case:
+// just signed up, never signed in), and the earlier version of this
+// function incorrectly skipped the pending-signup check entirely whenever
+// there was no session, which meant a freshly-approved signup's own
+// device could never notice the approval and move on to sign-in.
+// 1. A scouter who's currently signed in must be signed out the instant
+//    the authoritative roster says they're deactivated or bound to a
+//    different device (moved away), per the task's "signs out when it
+//    next scans the Setup QR" rule.
+// 2. A pending signup this device created locally is resolved the moment
+//    the authoritative roster actually contains that scouterId (meaning
+//    the lead approved it — pending accounts are never distributed, only
+//    active/deactivated ones are, so finding it at all means approved).
+//    A denial has no corresponding signal to detect automatically — the
+//    lead communicates that out of band, and the existing "Cancel signup"
+//    button is the scouter's own way to give up and restart.
+function revalidateSessionAgainstRoster() {
+  if (currentSession) {
+    const acct = findAccount(currentSession.scouterId);
+    if (!acct || acct.status === 'deactivated' || acct.boundDeviceId !== deviceId) endSession();
+  }
+  if (myPendingSignup && findAccount(myPendingSignup.scouterId)) {
+    myPendingSignup = null;
+    saveMyPendingSignup();
+  }
+}
+
+/* Account lifecycle — SHARED between the scouter's own signup form, the
+   lead's Scouters screen, and Join QR receipt. */
+async function createPendingAccount(name, pin) {
+  const scouterId = genShortId();
+  const pinHash = await hashScouterPin(scouterId, pin);
+  return { scouterId, name, pinHash, status: 'pending', boundDeviceId: deviceId, approvedAt: null, deactivatedAt: null, movedAt: null, createdAt: new Date().toISOString() };
+}
+function approveAccount(scouterId) {
+  const a = findAccount(scouterId);
+  if (!a || a.status !== 'pending') return false;
+  a.status = 'active'; a.approvedAt = new Date().toISOString();
+  bumpRosterVersion();
+  return true;
+}
+function denyPendingAccount(scouterId) {
+  const before = roster.accounts.length;
+  roster.accounts = roster.accounts.filter(a => a.scouterId !== scouterId);
+  if (roster.accounts.length === before) return false;
+  bumpRosterVersion();
+  return true;
+}
+function deactivateAccount(scouterId) {
+  const a = findAccount(scouterId);
+  if (!a) return false;
+  a.status = 'deactivated'; a.deactivatedAt = new Date().toISOString();
+  bumpRosterVersion();
+  return true;
+}
+function reactivateAccount(scouterId) {
+  const a = findAccount(scouterId);
+  if (!a) return false;
+  a.status = 'active'; a.deactivatedAt = null;
+  bumpRosterVersion();
+  return true;
+}
+function renameAccount(scouterId, newName) {
+  const a = findAccount(scouterId);
+  if (!a || !newName) return false;
+  a.name = newName;
+  bumpRosterVersion();
+  return true;
+}
+function clearAccountPin(scouterId) {
+  const a = findAccount(scouterId);
+  if (!a) return false;
+  a.pinHash = null;
+  bumpRosterVersion();
+  return true;
+}
+function moveAccountToDevice(scouterId, newDeviceId) {
+  const a = findAccount(scouterId);
+  if (!a) return false;
+  a.boundDeviceId = newDeviceId; a.movedAt = new Date().toISOString();
+  bumpRosterVersion();
+  return true;
+}
+// Lead-creates-accounts preview: active immediately, no PIN, no bound
+// device — the first device to sign in as this name claims it (see
+// signInWithAccount()'s "claim" branch). Same account SHAPE as a Join-QR
+// approval, just skipping straight to 'active' with nothing bound yet.
+function addScouterDirectly(name) {
+  const scouterId = genShortId();
+  roster.accounts.push({ scouterId, name, pinHash: null, status: 'active', boundDeviceId: null, approvedAt: new Date().toISOString(), deactivatedAt: null, movedAt: null, createdAt: new Date().toISOString() });
+  bumpRosterVersion();
+  return scouterId;
+}
+
+// Set by "Move to this device" right before opening the scanner — the
+// NEXT Join QR scanned rebinds that target account instead of creating or
+// updating anything else, regardless of whose Join QR it actually is.
+let pendingMoveTargetId = null;
+// Called from handleImportPart() for a {k:'join'} payload (lead side,
+// Export > Scan QR). Never throws.
+function handleJoinPayload(payload) {
+  const scouterId = payload.sid, name = payload.nm, pinHash = payload.ph, fromDeviceId = payload.dv;
+  if (!scouterId || !fromDeviceId) return { join: true, rejected: 'malformed' };
+  if (pendingMoveTargetId) {
+    const target = findAccount(pendingMoveTargetId);
+    const targetId = pendingMoveTargetId;
+    pendingMoveTargetId = null;
+    if (!target) return { join: true, rejected: 'moveTargetMissing' };
+    moveAccountToDevice(targetId, fromDeviceId);
+    return { join: true, moved: true, name: target.name };
+  }
+  const existing = findAccount(scouterId);
+  if (existing) {
+    // Same scouterId re-arriving: either a harmless re-scan, or a Reset
+    // PIN flow (the scouter's own device reuses its existing scouterId
+    // when it generates a new Join QR after the lead clears pinHash) —
+    // either way, this is an update to the SAME account, not a new one.
+    existing.name = name || existing.name;
+    existing.pinHash = pinHash;
+    existing.boundDeviceId = fromDeviceId;
+    bumpRosterVersion();
+    return { join: true, updated: true, name: existing.name };
+  }
+  roster.accounts.push({ scouterId, name: name || '', pinHash, status: 'pending', boundDeviceId: fromDeviceId, approvedAt: null, deactivatedAt: null, movedAt: null, createdAt: new Date().toISOString() });
+  bumpRosterVersion();
+  return { join: true, pending: true, name };
+}
+
+// Sign-in (scouter side). Returns null on success, or a user-facing error
+// string. The "claim" branch (pinHash === null) is what makes a
+// lead-added account (addScouterDirectly()) usable, AND is reused by the
+// Reset PIN flow once the lead has cleared the old hash.
+//
+// Deliberately does NOT call bumpRosterVersion() here, even though it
+// mutates the account — this function runs on a SCOUTER device, and
+// roster.version is a LEAD-AUTHORITATIVE counter distributed one-way via
+// Setup QR. Bumping it locally here would let a scouter device's version
+// race ahead of the lead's own, which would then permanently block that
+// device from accepting any FUTURE Setup QR whose version is lower than
+// what it bumped itself to (mergeRosterFromSetupPayload() only replaces
+// on a strictly HIGHER version). The claim itself is saved locally
+// (saveRoster()) so this device can use it immediately; the lead's own
+// roster catches up next time a Join QR carries this scouterId again
+// (e.g. Reset PIN's own flow) or another Setup QR cycle happens to
+// reflect it — a known, deliberately-accepted gap for the
+// addScouterDirectly()-claim path specifically, not the approval path
+// (which always round-trips through the lead via a real Join QR scan).
+async function signInWithAccount(scouterId, pin) {
+  const acct = findAccount(scouterId);
+  if (!acct) return 'Account not found.';
+  if (acct.status === 'deactivated') return 'This account has been deactivated.';
+  if (acct.status === 'pending') return 'Waiting for lead approval.';
+  if (!acct.pinHash) {
+    if (acct.boundDeviceId && acct.boundDeviceId !== deviceId) return 'This account is active on another device — ask your lead to move it.';
+    acct.pinHash = await hashScouterPin(scouterId, pin);
+    acct.boundDeviceId = deviceId;
+    saveRoster();
+    beginSession(scouterId, acct.name);
+    return null;
+  }
+  if (acct.boundDeviceId !== deviceId) return 'This account is active on another device — ask your lead to move it.';
+  const hash = await hashScouterPin(scouterId, pin);
+  if (hash !== acct.pinHash) return 'Wrong PIN.';
+  beginSession(scouterId, acct.name);
+  return null;
+}
+
 /* ══════════ ME SHEET (Scouter mode) ══════════ */
+// Switch Scouter only shows once the account system is actually in use on
+// this device (a non-empty roster or a session already exists) — a
+// legacy/free-text device sees nothing extra here.
+function renderMeAccountCard() {
+  const card = document.getElementById('meAccountCard');
+  const show = roster.accounts.length > 0 || !!currentSession;
+  card.style.display = show ? '' : 'none';
+  if (show) {
+    document.getElementById('meAccountHint').textContent = currentSession
+      ? `Signed in as ${currentSession.name}`
+      : 'Not signed in to an account.';
+  }
+}
 document.getElementById('meBtn').addEventListener('click', () => {
   document.getElementById('meSheet').style.display = 'block';
   updateUnsentCount();
   renderMeSavedEntries();
+  renderMeAccountCard();
 });
 document.getElementById('meCloseBtn').addEventListener('click', () => {
   document.getElementById('meSheet').style.display = 'none';
+});
+// Sign out, then reopen Who-Are-You in sign-in/signup mode — never loses
+// unsent entries, since signing out only clears the SESSION (who's
+// currently "holding the pen"), not any saved match/pit data, which lives
+// independently of who's signed in. showWhoAreYouScreen() itself decides
+// signin vs. legacy from the roster, same as any other entry point.
+document.getElementById('meSwitchScouterBtn').addEventListener('click', () => {
+  endSession();
+  document.getElementById('meSheet').style.display = 'none';
+  showWhoAreYouScreen();
 });
 // Lists every match/pit entry saved on THIS device (newest first), each
 // with an Edit button reusing the existing startEditMatch/startEditPit
@@ -5967,7 +6419,7 @@ renderSchedulePreview();
 // on the receiver, which always starts an incoming entry as unsent.
 const QR_KEY_MAP = [
   ['id','i'], ['matchType','mt'], ['matchNumber','mn'], ['teamNumber','tn'], ['alliance','al'],
-  ['scouter','sc'], ['ts','ts'], ['updatedAt','u'], ['legacy','lg'], ['schemaVersion','sv'],
+  ['scouter','sc'], ['scouterId','sid'], ['deviceId','did'], ['ts','ts'], ['updatedAt','u'], ['legacy','lg'], ['schemaVersion','sv'],
   ['leave','lv'], ['autoPark','ap'], ['teleopPark','tp'],
   ['startX','sx'], ['startY','sy'], ['startTile','st'],
   ['autoHiveMade','ahm'], ['teleopHiveMade','thm'], ['teleopFlowerMade','tfm'], ['ownGarden','og'],
@@ -6004,6 +6456,7 @@ function expandEntry(s) {
 // photos, which only travel via backup JSON.
 const PIT_KEY_MAP = [
   ['id','i'], ['teamNumber','tn'], ['teamName','tm'], ['drivetrain','dt'], ['scouter','sc'],
+  ['scouterId','sid'], ['deviceId','did'],
   ['ts','ts'], ['updatedAt','u'], ['schemaVersion','sv'],
   ['canHive','ch'], ['canFlower','cf'], ['canGarden','cg'], ['canParkLZ','cp'],
   ['intake','ik'], ['routines','rt'],
@@ -6075,6 +6528,22 @@ function base64UrlToBytes(str) {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
 }
+// PIN hashes are stored/compared as hex everywhere (simple, debuggable),
+// but a 64-char hex SHA-256 digest is ~43 chars as base64url — with up to
+// ~25 scouters riding inside a Setup QR alongside the schedule/teams, that
+// difference is worth taking for QR size, same reasoning as this file's
+// existing gzip-before-chunking step. compactPinHash()/expandPinHash() are
+// the only place this conversion happens — Join QR and the Setup QR
+// roster field both call through them, never duplicate the hex<->bytes math.
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return bytes;
+}
+function bytesToHex(bytes) { return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''); }
+function compactPinHash(hex) { return hex ? bytesToBase64Url(hexToBytes(hex)) : hex; }
+function expandPinHash(b64url) { return b64url ? bytesToHex(base64UrlToBytes(b64url)) : b64url;
+}
 async function gzipBytes(bytes) {
   const cs = new CompressionStream('gzip');
   const writer = cs.writable.getWriter();
@@ -6130,12 +6599,41 @@ async function openQrForEntries(matchEntries, pitEntries) {
 // schedule — that rides the exact same encode/URL/multi-part/overlay
 // machinery as a match/pit QR, distinguished only by a `k: 'setup'` tag in
 // the decoded JSON (match/pit payloads never have that key).
+// Pending accounts are never distributed — a scouter device has no way
+// to act on "pending" (only the lead approves/denies), so only the two
+// states a scouter device actually needs are sent: active (1) or
+// deactivated (0). A scouter who's currently signed in needs their OWN
+// deactivated record to arrive here so revalidateSessionAgainstRoster()
+// (called right after this is applied) can sign them out correctly.
+function compactRosterForQr() {
+  return roster.accounts.filter(a => a.status !== 'pending').map(a => ({
+    sid: a.scouterId, nm: a.name, ph: compactPinHash(a.pinHash), st: a.status === 'active' ? 1 : 0, bd: a.boundDeviceId || '',
+  }));
+}
+function expandRosterFromQr(list) {
+  return (list || []).map(r => ({
+    scouterId: r.sid, name: r.nm || '', pinHash: expandPinHash(r.ph) || null, status: r.st ? 'active' : 'deactivated',
+    boundDeviceId: r.bd || null, approvedAt: null, deactivatedAt: null, movedAt: null, createdAt: new Date().toISOString(),
+  }));
+}
+// Pulled out of applySetupPayload() so the "higher version wins" merge
+// rule is directly unit-testable without the rest of a Setup QR import's
+// UI side effects (schedule replace, Who-Are-You popping open, etc).
+function mergeRosterFromSetupPayload(ro) {
+  if (ro && typeof ro.v === 'number' && ro.v > roster.version) {
+    roster = { version: ro.v, accounts: expandRosterFromQr(ro.a) };
+    saveRoster();
+    return true;
+  }
+  return false;
+}
 async function encodeSetupForQr() {
   const payload = {
     k: 'setup',
     ev: { name: eventData.eventName || '', code: eventData.eventCode || '', season: eventData.season || null },
     tm: getEventTeamList(),
     sc: schedule.map(r => ({ t: r.type, m: r.match, r1: r.red1, r2: r.red2, b1: r.blue1, b2: r.blue2 })),
+    ro: { v: roster.version, a: compactRosterForQr() },
   };
   const json = JSON.stringify(payload);
   let bytes = new TextEncoder().encode(json);
@@ -6157,6 +6655,113 @@ async function openSetupQr() {
   document.getElementById('qrOverlay').style.display = 'block';
 }
 document.getElementById('showSetupQrBtn').addEventListener('click', openSetupQr);
+
+// Join QR (scouter side, Who-Are-You pending screen): tiny enough
+// (scouterId + name + a base64url PIN hash + deviceId) to never need
+// multi-part chunking, so it renders straight to its own <img> rather than
+// going through the shared multi-part #qrOverlay machinery — there's
+// nothing to page through. Uncompressed ('r' prefix, same convention as
+// Reset QR's tiny payload) since gzip overhead isn't worth it at this size.
+function buildJoinQrDataUrl(account) {
+  const payload = { k: 'join', sid: account.scouterId, nm: account.name, ph: compactPinHash(account.pinHash), dv: deviceId };
+  const url = `${HOSTED_APP_URL}#import=r${genShortId().slice(0, 6)}.1.1.${bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+  const qr = qrcode(0, 'M');
+  qr.addData(url);
+  qr.make();
+  const moduleCount = qr.getModuleCount();
+  const quietModules = 4;
+  const availablePx = Math.max(160, Math.min(window.innerWidth - 56, window.innerHeight * 0.4, 500));
+  const cellSize = Math.max(2, Math.floor(availablePx / (moduleCount + quietModules * 2)));
+  const margin = cellSize * quietModules;
+  return qr.createDataURL(cellSize, margin);
+}
+/* ══════════ SCOUTERS SCREEN (Lead) ══════════
+   Pending/Active/Deactivated lists over the SAME account functions the
+   Join QR handler and Who-Are-You use — this screen only ever calls
+   approveAccount()/denyPendingAccount()/etc., never duplicates their
+   logic. "Move to this device" puts the scanner into a one-shot mode
+   (pendingMoveTargetId) where the next scanned Join QR rebinds that
+   target account instead of creating/updating anything else. */
+function scouterEntriesCountAndLastSync(scouterId) {
+  const mine = [...matches, ...pits].filter(e => e.scouterId === scouterId);
+  const lastSync = mine.map(e => e.updatedAt || e.ts || '').sort().pop() || null;
+  return { count: mine.length, lastSync };
+}
+function scouterRowHtml(a) {
+  const { count, lastSync } = scouterEntriesCountAndLastSync(a.scouterId);
+  const actions = [];
+  if (a.status === 'pending') {
+    actions.push(`<button class="btn btn-primary btn-sm" data-scouter-approve="${esc(a.scouterId)}">Approve</button>`);
+    actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-deny="${esc(a.scouterId)}">Deny</button>`);
+  } else {
+    actions.push(a.status === 'active'
+      ? `<button class="btn btn-secondary btn-sm" data-scouter-deactivate="${esc(a.scouterId)}">Deactivate</button>`
+      : `<button class="btn btn-secondary btn-sm" data-scouter-reactivate="${esc(a.scouterId)}">Reactivate</button>`);
+    actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-rename="${esc(a.scouterId)}">Rename</button>`);
+    actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-resetpin="${esc(a.scouterId)}">Reset PIN</button>`);
+    actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-move="${esc(a.scouterId)}">Move to this device</button>`);
+  }
+  return `
+    <div class="review-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+      <div style="display:flex;justify-content:space-between;gap:8px;"><b>${esc(a.name || '(unnamed)')}</b><span class="hint">device ${esc((a.boundDeviceId || '—').slice(0, 6))}</span></div>
+      <div class="hint">${count} ${count === 1 ? 'entry' : 'entries'} · last sync ${lastSync ? new Date(lastSync).toLocaleString() : 'never'}</div>
+      <div class="btn-row">${actions.join('')}</div>
+    </div>`;
+}
+function renderScoutersScreen() {
+  const pending = roster.accounts.filter(a => a.status === 'pending');
+  const active = roster.accounts.filter(a => a.status === 'active');
+  const deactivated = roster.accounts.filter(a => a.status === 'deactivated');
+  document.getElementById('scoutersPendingCount').textContent = pending.length;
+  document.getElementById('scoutersActiveCount').textContent = active.length;
+  document.getElementById('scoutersDeactivatedCount').textContent = deactivated.length;
+  document.getElementById('scoutersPendingList').innerHTML = pending.length ? pending.map(scouterRowHtml).join('') : '<div class="empty-state">No pending requests.</div>';
+  document.getElementById('scoutersActiveList').innerHTML = active.length ? active.map(scouterRowHtml).join('') : '<div class="empty-state">No active scouters yet.</div>';
+  document.getElementById('scoutersDeactivatedList').innerHTML = deactivated.length ? deactivated.map(scouterRowHtml).join('') : '<div class="empty-state">None.</div>';
+  const root = document.getElementById('scoutersOverlay');
+  root.querySelectorAll('[data-scouter-approve]').forEach(b => b.addEventListener('click', () => { approveAccount(b.dataset.scouterApprove); renderScoutersScreen(); }));
+  root.querySelectorAll('[data-scouter-deny]').forEach(b => b.addEventListener('click', () => { if (confirm('Deny this pending signup?')) { denyPendingAccount(b.dataset.scouterDeny); renderScoutersScreen(); } }));
+  root.querySelectorAll('[data-scouter-deactivate]').forEach(b => b.addEventListener('click', () => { deactivateAccount(b.dataset.scouterDeactivate); renderScoutersScreen(); }));
+  root.querySelectorAll('[data-scouter-reactivate]').forEach(b => b.addEventListener('click', () => { reactivateAccount(b.dataset.scouterReactivate); renderScoutersScreen(); }));
+  root.querySelectorAll('[data-scouter-rename]').forEach(b => b.addEventListener('click', () => {
+    const a = findAccount(b.dataset.scouterRename);
+    const name = prompt('New name:', a ? a.name : '');
+    if (name) { renameAccount(b.dataset.scouterRename, name.trim()); renderScoutersScreen(); }
+  }));
+  root.querySelectorAll('[data-scouter-resetpin]').forEach(b => b.addEventListener('click', () => {
+    if (!confirm('Reset this scouter\'s PIN? They\'ll need to set a new one on their device, then show it to you to scan again.')) return;
+    clearAccountPin(b.dataset.scouterResetpin);
+    renderScoutersScreen();
+    showToast('PIN cleared — ask them to set a new one and show you the Join QR again');
+  }));
+  root.querySelectorAll('[data-scouter-move]').forEach(b => b.addEventListener('click', async () => {
+    pendingMoveTargetId = b.dataset.scouterMove;
+    showToast('Scan the Join QR on the new device…');
+    document.getElementById('scoutersOverlay').style.display = 'none';
+    await startQrScanner();
+  }));
+}
+// Called after any Join QR scan completes, so an already-open Scouters
+// screen reflects a new pending/approved/moved entry immediately instead
+// of only updating the next time the lead reopens it.
+function renderScoutersScreenIfOpen() {
+  if (document.getElementById('scoutersOverlay').style.display !== 'none') renderScoutersScreen();
+}
+document.getElementById('openScoutersBtn').addEventListener('click', () => {
+  document.getElementById('scoutersOverlay').style.display = 'block';
+  renderScoutersScreen();
+});
+document.getElementById('scoutersCloseBtn').addEventListener('click', () => {
+  document.getElementById('scoutersOverlay').style.display = 'none';
+});
+document.getElementById('addScouterDirectlyBtn').addEventListener('click', () => {
+  const name = prompt('Scouter name:');
+  if (!name || !name.trim()) return;
+  addScouterDirectly(name.trim());
+  renderScoutersScreen();
+  showToast('Scouter added — they can sign in and set their own PIN');
+});
+
 // ECC level M (vs. the old L) trades a bit of data capacity for real
 // resilience against glare/blur/dirt/partial occlusion — worth it paired
 // with the smaller QR_CHUNK_CHARS above. cellSize is computed fresh each
@@ -6304,15 +6909,20 @@ async function handleImportPart(sessionId, partNum, total, dataChunk) {
     return { complete: true, ...handleResetPayload(payload) };
   }
 
+  if (payload.k === 'join') {
+    const r = handleJoinPayload({ sid: payload.sid, nm: payload.nm, ph: expandPinHash(payload.ph), dv: payload.dv });
+    return { complete: true, ...r };
+  }
+
   const fullEntries = (payload.m || []).map(expandEntry);
   for (const e of fullEntries) await migrateEntryFull(e);
-  const rm = mergeEntriesByUpdatedAt(matches, fullEntries);
+  const rm = mergeEntriesByUpdatedAt(matches, checkReceivedEntries(fullEntries));
   matches = rm.merged;
   save(LS_MATCHES, matches);
 
   const fullPits = (payload.p || []).map(expandPit);
   for (const p of fullPits) await migratePitEntryFull(p);
-  const rp = mergeEntriesByUpdatedAt(pits, fullPits);
+  const rp = mergeEntriesByUpdatedAt(pits, checkReceivedEntries(fullPits));
   pits = rp.merged;
   save(LS_PIT, pits);
 
@@ -6324,9 +6934,12 @@ async function handleImportPart(sessionId, partNum, total, dataChunk) {
   };
 }
 
-// Applying a Setup QR replaces event info/teams/schedule only — it never
-// touches matches/pits, so re-showing the Setup QR after a schedule change
-// is always safe to re-scan.
+// Applying a Setup QR replaces event info/teams/schedule/roster — it never
+// touches matches/pits, so re-showing the Setup QR after a schedule or
+// roster change is always safe to re-scan. The roster only replaces on a
+// STRICTLY higher version (never on equal/lower), same "higher version
+// wins" rule the task specifies — a stale or out-of-order re-scan can't
+// roll a device's roster backward.
 function applySetupPayload(payload) {
   eventData.eventName = (payload.ev && payload.ev.name) || '';
   eventData.eventCode = (payload.ev && payload.ev.code) || '';
@@ -6335,6 +6948,8 @@ function applySetupPayload(payload) {
   saveEventData();
   schedule = Array.isArray(payload.sc) ? payload.sc.map(r => ({ type: r.t, match: r.m, red1: r.r1, red2: r.r2, blue1: r.b1, blue2: r.b2 })) : schedule;
   try { localStorage.setItem(LS_SCHEDULE, JSON.stringify(schedule)); } catch(e) {}
+  mergeRosterFromSetupPayload(payload.ro);
+  revalidateSessionAgainstRoster();
   // A setup import means the device is "at" this event now — move any
   // in-progress (not yet saved) draft over too, same as a fresh draft would get.
   stampCurrentEvent(draft);
@@ -6342,6 +6957,55 @@ function applySetupPayload(payload) {
   renderSchedulePreview();
   renderPitTeamSuggestions();
   showWhoAreYouScreen();
+}
+// Who-Are-You's mode decides which card(s) show; renderWhoAreYou() is the
+// one place that maps wayMode -> visible cards, so every entry point
+// (opening the screen, following a link, finishing sign-in/signup/cancel)
+// goes through the same render instead of each handler toggling display
+// styles itself.
+let wayMode = 'legacy'; // 'legacy' | 'signin' | 'signup' | 'pending' | 'ready'
+function isSessionValid() {
+  if (!currentSession) return false;
+  const acct = findAccount(currentSession.scouterId);
+  return !!acct && acct.status === 'active' && acct.boundDeviceId === deviceId;
+}
+function renderSignInPinLabel() {
+  const acct = findAccount(document.getElementById('waySignInSelect').value);
+  document.getElementById('waySignInPinLabel').textContent = (acct && !acct.pinHash) ? 'Create a 4-digit PIN (first sign-in)' : 'PIN';
+}
+function renderWhoAreYou() {
+  const cardOf = { legacy: 'wayLegacyCard', signin: 'waySignInCard', signup: 'waySignUpCard', pending: 'wayPendingCard' };
+  Object.values(cardOf).forEach(id => document.getElementById(id).style.display = 'none');
+  document.getElementById('wayStationCard').style.display = 'none';
+  document.getElementById('wayDoneRow').style.display = 'none';
+  // Station + Done are part of BOTH 'legacy' (name + station, unchanged
+  // from before accounts existed) and 'ready' (already signed in, just
+  // needs a station) — only signin/signup/pending hide them, since those
+  // haven't resolved an identity yet.
+  if (wayMode === 'ready' || wayMode === 'legacy') {
+    document.getElementById('wayStationCard').style.display = '';
+    document.getElementById('wayDoneRow').style.display = 'flex';
+    document.querySelectorAll('#wayStationRow button').forEach(b => b.classList.toggle('active', b.dataset.station === station));
+  }
+  if (wayMode === 'ready') return;
+  document.getElementById(cardOf[wayMode]).style.display = '';
+  if (wayMode === 'signin') {
+    const sel = document.getElementById('waySignInSelect');
+    const pickable = roster.accounts.filter(a => a.status === 'active');
+    sel.innerHTML = pickable.length
+      ? pickable.map(a => `<option value="${esc(a.scouterId)}">${esc(a.name)}</option>`).join('')
+      : `<option value="">No approved scouters yet</option>`;
+    document.getElementById('waySignInPin').value = '';
+    document.getElementById('waySignInHint').textContent = '';
+    renderSignInPinLabel();
+  } else if (wayMode === 'signup') {
+    document.getElementById('waySignUpName').value = '';
+    document.getElementById('waySignUpPin').value = '';
+    document.getElementById('waySignUpHint').textContent = '';
+    document.getElementById('wayGoSignInWrap').style.display = roster.accounts.some(a => a.status === 'active') ? '' : 'none';
+  } else if (wayMode === 'pending') {
+    document.getElementById('wayJoinQrImage').src = buildJoinQrDataUrl(myPendingSignup);
+  }
 }
 function showWhoAreYouScreen() {
   // The scanner must be fully closed (camera stopped, overlay hidden)
@@ -6353,15 +7017,66 @@ function showWhoAreYouScreen() {
   // of an in-app scan).
   stopQrScanner();
   document.getElementById('way-scouterName').value = persistedScouter;
-  document.querySelectorAll('#wayStationRow button').forEach(b => b.classList.toggle('active', b.dataset.station === station));
+  // Mode selection: a pending signup always wins (resolve it before
+  // anything else); a still-valid session on THIS device skips straight to
+  // station (no need to re-authenticate every setup scan); a non-empty
+  // roster means the account system is in use here, so sign-in is the
+  // entry point; a device that's never touched any of this — the task's
+  // "devices already set up keep working" case — gets the unchanged
+  // free-text screen.
+  if (myPendingSignup) wayMode = 'pending';
+  else if (isSessionValid()) wayMode = 'ready';
+  else if (roster.accounts.length > 0) wayMode = 'signin';
+  else wayMode = 'legacy';
+  renderWhoAreYou();
   document.getElementById('whoAreYouOverlay').style.display = 'block';
 }
-document.getElementById('wayDoneBtn').addEventListener('click', () => {
+function finishWhoAreYou() {
   document.getElementById('whoAreYouOverlay').style.display = 'none';
   document.querySelector('nav button[data-page="scout"]').click();
   document.querySelector('#page-scout .step-nav button[data-step="setup"]').click();
   maybeAutoFillSetup();
   reapplyAutoFillIfTagged();
+}
+document.getElementById('wayDoneBtn').addEventListener('click', finishWhoAreYou);
+document.getElementById('wayLegacyGoSignupLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signup'; renderWhoAreYou(); });
+document.getElementById('wayGoSignupLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signup'; renderWhoAreYou(); });
+// Sign-in mode is the one place this overlay can get re-triggered by
+// something OTHER than the user's own choice (a Setup QR re-scan that
+// signs them out after a deactivation/move) — "blocks new scouting" was
+// never meant to also block reaching Send my data / Reset this device on
+// a device that already has unsent entries sitting on it, so this just
+// closes the overlay without requiring a sign-in first.
+document.getElementById('wayNotNowLink').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('whoAreYouOverlay').style.display = 'none'; });
+document.getElementById('wayGoSignInLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signin'; renderWhoAreYou(); });
+document.getElementById('waySignInSelect').addEventListener('change', renderSignInPinLabel);
+document.getElementById('waySignInBtn').addEventListener('click', async () => {
+  const scouterId = document.getElementById('waySignInSelect').value;
+  const pin = document.getElementById('waySignInPin').value.trim();
+  const hint = document.getElementById('waySignInHint');
+  if (!scouterId) { hint.textContent = 'Choose your name.'; return; }
+  if (!/^\d{4}$/.test(pin)) { hint.textContent = 'Enter exactly 4 digits.'; return; }
+  const err = await signInWithAccount(scouterId, pin);
+  if (err) { hint.textContent = err; document.getElementById('waySignInPin').value = ''; return; }
+  wayMode = 'ready';
+  renderWhoAreYou();
+});
+document.getElementById('waySignUpBtn').addEventListener('click', async () => {
+  const name = document.getElementById('waySignUpName').value.trim();
+  const pin = document.getElementById('waySignUpPin').value.trim();
+  const hint = document.getElementById('waySignUpHint');
+  if (!name) { hint.textContent = 'Enter your name.'; return; }
+  if (!/^\d{4}$/.test(pin)) { hint.textContent = 'Create a 4-digit PIN.'; return; }
+  myPendingSignup = await createPendingAccount(name, pin);
+  saveMyPendingSignup();
+  wayMode = 'pending';
+  renderWhoAreYou();
+});
+document.getElementById('wayPendingCancelBtn').addEventListener('click', () => {
+  myPendingSignup = null;
+  saveMyPendingSignup();
+  wayMode = roster.accounts.length > 0 ? 'signin' : 'legacy';
+  renderWhoAreYou();
 });
 
 /* ══════════ RESET QR (lead-controlled scouter-device wipe) ══════════ */
@@ -6496,7 +7211,7 @@ async function checkImportHash() {
   if (!sessionId || !partNum || !total) return;
   const result = await handleImportPart(sessionId, partNum, total, data);
   if (result.complete) {
-    showToast(result.error || resetResultMessage(result) || (result.setup ? 'Event setup loaded' : `QR import: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`), !!result.error || isResetRejection(result));
+    showToast(result.error || resetResultMessage(result) || joinResultMessage(result) || (result.setup ? 'Event setup loaded' : `QR import: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`), !!result.error || isResetRejection(result));
   } else {
     showToast(`QR part ${result.received} of ${result.total} received — scan the rest`);
   }
@@ -6513,6 +7228,15 @@ function resetResultMessage(result) {
   return 'Reset requested — see the confirm screen';
 }
 function isResetRejection(result) { return result.reset && !!result.rejected; }
+// Same shared-message pattern as resetResultMessage() above, for a {k:'join'} result.
+function joinResultMessage(result) {
+  if (!result.join) return null;
+  if (result.rejected) return 'Join QR not recognized';
+  if (result.moved) return `Moved ${result.name || 'scouter'} to this device`;
+  if (result.updated) return `Updated ${result.name || 'scouter'}`;
+  if (result.pending) return `${result.name || 'New scouter'} added to Pending`;
+  return 'Join QR received';
+}
 
 /* ══════════ IN-APP SCANNER (task 11b, Phase 4; hardened against
    webcam-angle sensitivity) ══════════
@@ -6707,9 +7431,9 @@ async function handleScannedUrl(text) {
   if (isNewPart) scannerPartFeedback();
   renderScannerProgress(sessionId, total);
   document.getElementById('scannerStatus').textContent = result.complete
-    ? (result.error || resetResultMessage(result) || (result.setup ? 'Event setup loaded' : `Done: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`))
+    ? (result.error || resetResultMessage(result) || joinResultMessage(result) || (result.setup ? 'Event setup loaded' : `Done: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`))
     : `${result.received} of ${result.total} received — keep scanning`;
-  if (result.complete) setTimeout(stopQrScanner, 1500);
+  if (result.complete) { setTimeout(stopQrScanner, 1500); if (result.join) renderScoutersScreenIfOpen(); }
 }
 document.getElementById('scanQrBtn').addEventListener('click', startQrScanner);
 document.getElementById('scannerCloseBtn').addEventListener('click', stopQrScanner);
@@ -10097,6 +10821,101 @@ async function runSelfTests() {
         eventData.pickMarks = {};
       } catch (err) { record('Pick Score: marking a team Taken sorts it to the bottom without hiding it, even if it outscores unmarked teams', false, err.message); }
       finally { pickFixtureRestore(); }
+    }
+
+    // Scouter Accounts: PIN hash/salt, roster version merge, deactivated-
+    // entry handling, device-mismatch handling around the move time, and
+    // migration of old entries. Each test saves/restores roster/
+    // currentSession/window.confirm so nothing leaks into later tests.
+    {
+      const acctSaved = { roster: JSON.parse(JSON.stringify(roster)), currentSession: currentSession ? { ...currentSession } : null };
+      function acctRestore() {
+        roster = acctSaved.roster; saveRoster();
+        currentSession = acctSaved.currentSession; saveSession();
+      }
+
+      try {
+        const h1 = await hashScouterPin('scoutA', '1234');
+        const h2 = await hashScouterPin('scoutB', '1234');
+        const h1Again = await hashScouterPin('scoutA', '1234');
+        const pass = h1 !== h2 && h1 === h1Again && /^[0-9a-f]{64}$/.test(h1);
+        record('Accounts: PIN hashing is salted per-account (same PIN, different scouterId -> different hash, same inputs -> same hash)', pass, { h1, h2 });
+      } catch (err) { record('Accounts: PIN hashing is salted per-account (same PIN, different scouterId -> different hash, same inputs -> same hash)', false, err.message); }
+
+      try {
+        roster = { version: 0, accounts: [] };
+        const acct = await createPendingAccount('Sign-In Tester', '4321');
+        acct.status = 'active'; acct.boundDeviceId = deviceId;
+        roster.accounts.push(acct);
+        const wrongPinErr = await signInWithAccount(acct.scouterId, '0000');
+        currentSession = null;
+        const rightPinErr = await signInWithAccount(acct.scouterId, '4321');
+        const signedInName = currentSession && currentSession.name;
+        const pass = wrongPinErr === 'Wrong PIN.' && rightPinErr === null && signedInName === 'Sign-In Tester';
+        record('Accounts: sign-in rejects the wrong PIN and succeeds with the right one', pass, { wrongPinErr, rightPinErr, signedInName });
+      } catch (err) { record('Accounts: sign-in rejects the wrong PIN and succeeds with the right one', false, err.message); }
+      finally { acctRestore(); }
+
+      try {
+        roster = { version: 5, accounts: [{ scouterId: 'keep', name: 'Keep Me', pinHash: 'x', status: 'active', boundDeviceId: 'd1', approvedAt: null, deactivatedAt: null, movedAt: null, createdAt: '' }] };
+        const notReplacedAtEqual = !mergeRosterFromSetupPayload({ v: 5, a: [{ sid: 'new', nm: 'New', ph: '', st: 1, bd: 'd2' }] });
+        const stillHasKeep = roster.version === 5 && roster.accounts.some(a => a.scouterId === 'keep') && !roster.accounts.some(a => a.scouterId === 'new');
+        const replacedAtHigher = mergeRosterFromSetupPayload({ v: 6, a: [{ sid: 'new', nm: 'New', ph: '', st: 1, bd: 'd2' }] });
+        const nowHasNew = roster.version === 6 && roster.accounts.some(a => a.scouterId === 'new') && !roster.accounts.some(a => a.scouterId === 'keep');
+        const pass = notReplacedAtEqual && stillHasKeep && replacedAtHigher && nowHasNew;
+        record('Accounts: Setup QR roster merges only on a STRICTLY higher version, never equal/lower', pass, { notReplacedAtEqual, stillHasKeep, replacedAtHigher, nowHasNew });
+      } catch (err) { record('Accounts: Setup QR roster merges only on a STRICTLY higher version, never equal/lower', false, err.message); }
+      finally { acctRestore(); }
+
+      try {
+        roster = { version: 1, accounts: [{ scouterId: 'deact1', name: 'Deactivated Dana', pinHash: 'x', status: 'deactivated', boundDeviceId: 'd1', approvedAt: '2026-01-01T00:00:00Z', deactivatedAt: '2026-06-01T00:00:00Z', movedAt: null, createdAt: '' }] };
+        const beforeEntry = { id: 'e1', scouterId: 'deact1', deviceId: 'd1', updatedAt: '2026-05-01T00:00:00Z' }; // scouted BEFORE deactivation
+        const afterEntry = { id: 'e2', scouterId: 'deact1', deviceId: 'd1', updatedAt: '2026-07-01T00:00:00Z' }; // AFTER deactivation
+        const unknownEntry = { id: 'e3', scouterId: 'nobody', deviceId: 'd1', updatedAt: '2026-07-01T00:00:00Z' };
+        const savedConfirm = window.confirm;
+        window.confirm = () => false; // Skip every flagged group
+        const skippedAllowed = checkReceivedEntries([beforeEntry, afterEntry, unknownEntry]);
+        window.confirm = () => true; // Import anyway
+        const importedAllowed = checkReceivedEntries([afterEntry, unknownEntry]);
+        window.confirm = savedConfirm;
+        const pass = skippedAllowed.length === 1 && skippedAllowed[0].id === 'e1'
+          && importedAllowed.length === 2 && importedAllowed.some(e => e.id === 'e2') && importedAllowed.some(e => e.id === 'e3');
+        record('Accounts: deactivated/unknown-scouter entries are held for Import anyway/Skip, except ones scouted before deactivation', pass,
+          { skippedAllowedIds: skippedAllowed.map(e => e.id), importedAllowedIds: importedAllowed.map(e => e.id) });
+      } catch (err) { record('Accounts: deactivated/unknown-scouter entries are held for Import anyway/Skip, except ones scouted before deactivation', false, err.message); }
+      finally { acctRestore(); }
+
+      try {
+        roster = { version: 1, accounts: [{ scouterId: 'moved1', name: 'Moved Max', pinHash: 'x', status: 'active', boundDeviceId: 'newDevice', approvedAt: '2026-01-01T00:00:00Z', deactivatedAt: null, movedAt: '2026-06-01T00:00:00Z', createdAt: '' }] };
+        const fromOldBeforeMove = { id: 'e1', scouterId: 'moved1', deviceId: 'oldDevice', updatedAt: '2026-05-01T00:00:00Z' }; // scouted on the OLD device BEFORE the move
+        const fromOldAfterMove = { id: 'e2', scouterId: 'moved1', deviceId: 'oldDevice', updatedAt: '2026-07-01T00:00:00Z' }; // old device, AFTER the move -- suspicious
+        const fromNewDevice = { id: 'e3', scouterId: 'moved1', deviceId: 'newDevice', updatedAt: '2026-07-01T00:00:00Z' }; // the bound device -- always fine
+        const savedConfirm = window.confirm;
+        window.confirm = () => false;
+        const skippedAllowed = checkReceivedEntries([fromOldBeforeMove, fromOldAfterMove, fromNewDevice]);
+        window.confirm = savedConfirm;
+        const pass = skippedAllowed.length === 2 && skippedAllowed.some(e => e.id === 'e1') && skippedAllowed.some(e => e.id === 'e3') && !skippedAllowed.some(e => e.id === 'e2');
+        record('Accounts: entries from an unrecognized device are held, except ones from the old device scouted before the move', pass,
+          { allowedIds: skippedAllowed.map(e => e.id) });
+      } catch (err) { record('Accounts: entries from an unrecognized device are held, except ones from the old device scouted before the move', false, err.message); }
+      finally { acctRestore(); }
+
+      try {
+        const oldMatch = { id: 'm1', teamNumber: '1', schemaVersion: 7 };
+        const v8Changed = migrateV7ToV8(oldMatch);
+        const oldPit = { id: 'p1', teamNumber: '1', schemaVersion: 5 };
+        const v6Changed = migratePitEntryV6(oldPit);
+        const savedConfirm = window.confirm;
+        window.confirm = () => { throw new Error('confirm() should never be called for a legacy entry with no scouterId'); };
+        const legacyAllowed = checkReceivedEntries([{ id: 'legacy1', scouterId: oldMatch.scouterId, updatedAt: '2026-01-01T00:00:00Z' }]);
+        window.confirm = savedConfirm;
+        const pass = v8Changed && oldMatch.scouterId === '' && oldMatch.deviceId === '' && oldMatch.schemaVersion === 8
+          && v6Changed && oldPit.scouterId === '' && oldPit.deviceId === '' && oldPit.schemaVersion === 6
+          && legacyAllowed.length === 1;
+        record('Accounts: migrating an old entry defaults scouterId/deviceId to \'\', and it is never flagged on receive', pass,
+          { oldMatch, oldPit, legacyAllowedLength: legacyAllowed.length });
+      } catch (err) { record('Accounts: migrating an old entry defaults scouterId/deviceId to \'\', and it is never flagged on receive', false, err.message); }
+      finally { acctRestore(); }
     }
 
     // Scouter self-reset (Me sheet link): routes to the blocked screen
