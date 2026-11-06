@@ -1102,7 +1102,7 @@
           <button type="button" class="btn btn-danger btn-sm" id="clearPickMarksBtn">Clear marks</button>
         </div>
         <div class="hint" id="howRankedNote" style="display:none;margin-top:8px;">
-          Each team gets a 0-100 Pick Score blending two things: our own scouting (average estimated points mainly, plus auto points, park reliability, tip share, driver/defense ratings, and pit capabilities — broken-down rate and cards count against it, a red card heavily) and FTCScout's cached stats (OPR mainly, then rank/RP and win-loss-tie). The more matches we've scouted for a team, the more its score leans on our own data over FTCScout's; with zero scouted matches it's FTCScout only, and with no FTCScout data at all it's scouting only. "⚠ Data disagree" means our numbers and FTCScout's disagree by a lot — worth a second look either way.
+          Each team gets a 0-100 Pick Score blending two things: our own scouting (average estimated points mainly, plus auto points, park reliability, tip share, driver/defense ratings, and pit capabilities — broken-down rate and cards count against it, a red card heavily) and FTCScout's cached stats (OPR mainly, then rank/RP and win-loss-tie). The more matches we've scouted for a team, the more its score leans on our own data over FTCScout's; with zero scouted matches it's FTCScout only, and with no FTCScout data at all it's scouting only. Early in an event, before a team has played 3 matches here, its OPR falls back to that team's season-wide OPR from earlier events (labeled "Season OPR" and weighted a bit less) instead of a too-thin current-event number. "⚠ Data disagree" means our numbers and FTCScout's disagree by a lot — worth a second look either way.
         </div>
       </div>
       <div class="card">
@@ -1591,21 +1591,25 @@ function idbGetAllKeys() {
 }
 function newImageId() { return 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9); }
 
-// Event-picker season cache: one record under a fixed key (there's only
-// ever one "current season" cache), same DB/connection as images above.
+// Event-picker season cache: one record per fixed key, same object store
+// (and DB/connection) as images above. idbPutEventCache()/idbGetEventCache()
+// default to the original "all events this season" key so every pre-existing
+// call site is unaffected; a second key (SEASON_QUICKSTATS_IDB_KEY) holds the
+// Suggested Pick List's per-team season-OPR fallback cache (see FTCSCOUT
+// FTCSCOUT_CURRENT_SEASON QUICKSTATS section below) in the same store.
 const EVENT_CACHE_IDB_KEY = 'allEvents';
-function idbPutEventCache(value) {
+function idbPutEventCache(value, key) {
   return openImageDB().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_EVENT_CACHE_STORE, 'readwrite');
-    tx.objectStore(IDB_EVENT_CACHE_STORE).put(value, EVENT_CACHE_IDB_KEY);
+    tx.objectStore(IDB_EVENT_CACHE_STORE).put(value, key || EVENT_CACHE_IDB_KEY);
     tx.oncomplete = () => resolve(true);
     tx.onerror = () => reject(tx.error);
   }));
 }
-function idbGetEventCache() {
+function idbGetEventCache(key) {
   return openImageDB().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_EVENT_CACHE_STORE, 'readonly');
-    const req = tx.objectStore(IDB_EVENT_CACHE_STORE).get(EVENT_CACHE_IDB_KEY);
+    const req = tx.objectStore(IDB_EVENT_CACHE_STORE).get(key || EVENT_CACHE_IDB_KEY);
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   }));
@@ -5380,6 +5384,37 @@ const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
     teams { team { number } stats { ... on TeamEventStats2026 { rank rp wins losses ties opr { totalPointsNp } } } }
   }
 }`;
+/* ══════════ FTCSCOUT SEASON QUICKSTATS (Suggested Pick List fallback) ══════════
+   VERIFIED 2026-11-05 against the live API via schema introspection + real
+   queries: `Team.quickStats(season: Int!, region: RegionOption)` is a
+   SEASON-WIDE aggregate (confirmed by querying a past, completed season —
+   2025 — and getting a real non-null value, then confirming teams with no
+   2026 matches yet get `quickStats(season: 2026) == null`), distinct from
+   `eventByCode.teams[].stats` above (which is event-specific). It returns
+   `{ tot, auto, dc, eg }`, each a `{value, rank}` QuickStat, plus a `count`
+   field — empirically confirmed `count` is NOT this team's match count (every
+   team queried for the same season came back with the IDENTICAL `count`,
+   e.g. 1331 — it's a pool-size denominator behind `rank`, not per-team), so
+   only `tot.value` is used here as "season OPR"; the per-event match count
+   used for the 3-match cutover comes from the event stats above instead
+   (wins+losses+ties), not from this at all.
+   There is no batch "teams(numbers:[...])" query in the schema — only
+   `teamByNumber(number: Int!)` singular — so all of an event's ~40 teams are
+   fetched in exactly ONE HTTP request via GraphQL aliasing (`t123:
+   teamByNumber(number: 123) { ... }` repeated per team in one query string),
+   not 40 separate round trips. */
+async function fetchSeasonQuickStatsFor(teamNumbers) {
+  const nums = [...new Set(teamNumbers.map(t => Number(t)).filter(n => Number.isFinite(n) && n > 0))];
+  if (!nums.length) return {};
+  const query = `query($season: Int!) { ${nums.map(n => `t${n}: teamByNumber(number: ${n}) { quickStats(season: $season) { tot { value } } }`).join(' ')} }`;
+  const data = await ftcscoutQuery(query, { season: FTCSCOUT_CURRENT_SEASON });
+  const out = {};
+  nums.forEach(n => {
+    const entry = data && data['t' + n];
+    out[String(n)] = (entry && entry.quickStats && entry.quickStats.tot) ? entry.quickStats.tot.value : null;
+  });
+  return out;
+}
 /* ══════════ EVENT PICKER (Settings > Event Data, Lead only) ══════════
    Picking an event used to mean leaving the app to look up a code/name on
    ftcscout.org and typing or copy-pasting it in. This picker instead pulls
@@ -5437,6 +5472,11 @@ const LS_RECENT_EVENTS = 'biobuzz2026_recentevents';
 // picker only ever reads this from a user-initiated tap (Pick Event...),
 // well after init has had time to finish, so the brief gap is harmless.
 let allEventsCache = null;
+// Suggested Pick List's season-OPR fallback cache, keyed in the same
+// IndexedDB store as allEventsCache above (SEASON_QUICKSTATS_IDB_KEY) so it
+// works fully offline once fetched; { season, fetchedAt, stats: {teamNumber: oprValueOrNull} }.
+const SEASON_QUICKSTATS_IDB_KEY = 'seasonQuickStats';
+let seasonQuickStatsCache = null;
 let ourEventsCache = (() => { try { return JSON.parse(localStorage.getItem(LS_EVENT_CACHE_OURS)) || null; } catch(e) { return null; } })();
 let recentEvents = (() => { try { return JSON.parse(localStorage.getItem(LS_RECENT_EVENTS)) || []; } catch(e) { return []; } })();
 // Moves a pre-existing LS_EVENT_CACHE_ALL localStorage copy (from before
@@ -5701,6 +5741,30 @@ async function fetchEventData(silent) {
       };
     });
   } catch (err) { /* rank/RP/OPR/W-L-T left as whatever was cached before — not fatal, core event data above is unaffected */ }
+  // Season-OPR fallback for the Suggested Pick List: only fetched for teams
+  // still thin on current-event data (fewer than 3 matches played here, the
+  // same threshold the scoring layer uses to decide whether to trust
+  // current-event OPR at all) — a team already past that threshold never
+  // needs it, so a later silent 5-min refresh re-fetches a shrinking set as
+  // teams play more matches, not the whole field every time. Best-effort:
+  // failure here must not block the event/stats fetch above, and never
+  // clears whatever was cached from a previous successful fetch.
+  try {
+    const needsFallback = (eventData.teams || []).map(t => normTeam(t.number)).filter(n => {
+      const s = eventData.teamStats[n];
+      const matchesHere = (s && s.wins != null) ? s.wins + s.losses + s.ties : 0;
+      return matchesHere < 3;
+    });
+    if (needsFallback.length) {
+      const fetched = await fetchSeasonQuickStatsFor(needsFallback);
+      seasonQuickStatsCache = {
+        season: FTCSCOUT_CURRENT_SEASON,
+        fetchedAt: new Date().toISOString(),
+        stats: { ...(seasonQuickStatsCache ? seasonQuickStatsCache.stats : {}), ...fetched },
+      };
+      try { await idbPutEventCache(seasonQuickStatsCache, SEASON_QUICKSTATS_IDB_KEY); } catch(e) {}
+    }
+  } catch (err) { /* season-OPR fallback is best-effort — current-event data and the scouting-only fallback still work without it */ }
   if (coreOk) eventData.lastUpdated = new Date().toISOString();
   saveEventData();
   renderSchedulePreview();
@@ -6725,9 +6789,31 @@ function pickListCandidates() {
   const ourNorm = normTeam(ourTeamNumber);
   return getEventTeamList().filter(t => t.n !== ourNorm);
 }
+// The Pick Score's OPR number prefers the CURRENT event's own OPR once a
+// team has played enough matches here to trust it (3+, the same threshold
+// the "Low data" flag uses for scouting) — below that, it falls back to the
+// team's season-wide OPR from Team.quickStats (fetched by
+// fetchSeasonQuickStatsFor(), cached in seasonQuickStatsCache so this works
+// offline), since early in an event is exactly when current-event data is
+// thinnest for everyone. A team with neither (true rookie, or the season
+// cache hasn't been fetched yet) resolves to source: null, handled
+// identically to "no FTCScout data" everywhere downstream.
+function resolveOprForTeam(team, official) {
+  const matchesAtEvent = (official.wins !== null) ? official.wins + official.losses + official.ties : 0;
+  if (official.opr !== null && matchesAtEvent >= 3) {
+    return { opr: official.opr, source: 'event', matchesAtEvent };
+  }
+  const seasonStats = seasonQuickStatsCache && seasonQuickStatsCache.stats;
+  const seasonOpr = seasonStats ? seasonStats[team] : undefined;
+  if (seasonOpr !== undefined && seasonOpr !== null) {
+    return { opr: seasonOpr, source: 'season', matchesAtEvent };
+  }
+  return { opr: official.opr, source: official.opr !== null ? 'event' : null, matchesAtEvent };
+}
 function pickListRawData(team) {
   const entries = rankableMatches().filter(m => normTeam(m.teamNumber) === team);
-  return { team, stats: computeTeamStats(entries), pit: mergePitEntriesForTeam(team), official: getOfficialStats(team) };
+  const official = getOfficialStats(team);
+  return { team, stats: computeTeamStats(entries), pit: mergePitEntriesForTeam(team), official, oprResolved: resolveOprForTeam(team, official) };
 }
 function pitCapabilityScore(pit) {
   if (!pit) return null; // no pit entry at all = unknown, excluded from the average rather than counted as 0
@@ -6765,15 +6851,22 @@ function scoutingCompositeRaw(d, normTotal, normAuto, normTip) {
   return Math.max(0, Math.min(100, base - brokenPenalty - cardPenalty));
 }
 // The FTCScout-side composite (0-100, null if this team has no official
-// stats at all). OPR (totalPointsNp) is the main factor; rank (inverted —
-// rank 1 is best) and RP fill in the rest, then W-L-T.
+// stats at all, current-event OR season-fallback). OPR is the main factor —
+// using d.oprResolved (current-event OPR once 3+ matches played here, else
+// the team's season OPR) rather than the raw current-event value, so a
+// team still thin on current-event data isn't scored as if it had none at
+// all. A season-fallback OPR counts for a bit less than a real current-event
+// one (0.45 vs 0.6) — it's a real signal, just a noisier one for THIS
+// event's bracket of teams. Rank/RP/win% always come from the current
+// event only (quickStats has no event-specific rank/RP to fall back to).
 function ftcCompositeRaw(d, normOpr, normRank, normRp) {
   const off = d.official;
-  if (off.opr === null && off.rank === null && off.rp === null && off.wins === null) return null;
+  if (d.oprResolved.opr === null && off.rank === null && off.rp === null && off.wins === null) return null;
   const winPct = (off.wins !== null && (off.wins + off.losses + off.ties) > 0)
     ? off.wins / (off.wins + off.losses + off.ties) * 100 : null;
+  const oprWeight = d.oprResolved.source === 'season' ? 0.45 : 0.6;
   const parts = [
-    [normOpr(off.opr), 0.6],
+    [normOpr(d.oprResolved.opr), oprWeight],
     [normRank(off.rank), 0.2],
     [normRp(off.rp), 0.1],
     [winPct, 0.1],
@@ -6816,9 +6909,9 @@ function blendPickScore(d, scoutComposite, ftcComposite, hasAnyFtcStats) {
 // shown alongside the ranking, not a filter.
 function computePickFlags(d) {
   const flags = [];
-  if (d.stats.matches > 0 && d.official.opr !== null) {
-    const diff = Math.abs(d.stats.avgTotal - d.official.opr);
-    const pctDiff = diff / Math.max(d.stats.avgTotal, d.official.opr, 1);
+  if (d.stats.matches > 0 && d.oprResolved.opr !== null) {
+    const diff = Math.abs(d.stats.avgTotal - d.oprResolved.opr);
+    const pctDiff = diff / Math.max(d.stats.avgTotal, d.oprResolved.opr, 1);
     if (diff > 10 && pctDiff > 0.40) flags.push({ key: 'disagree', label: '⚠ Data disagree' });
   }
   if (d.stats.matches < 3) flags.push({ key: 'lowdata', label: 'Low data' });
@@ -6827,9 +6920,12 @@ function computePickFlags(d) {
 }
 // Top 2-3 human-readable reasons behind a team's rank, picking whichever
 // factors most pushed its composite up (or, for penalties, down) relative
-// to the field. oprRankOf is a {team: rank} map precomputed once across
-// all candidates with real OPR, for the "OPR 48 (#3)" style reason.
-function computePickReasons(d, normTotal, normAuto, oprRankOf) {
+// to the field. The OPR reason labels where the number came from — "OPR 48
+// (this event)" vs "Season OPR 41 (prev. events)" — so a lead never
+// mistakes an older, less event-specific number for a current one; the
+// season version weighs a little less in case the composite is tight
+// against other reasons.
+function computePickReasons(d, normTotal, normAuto) {
   const reasons = [];
   if (d.stats.matches > 0) {
     if (normTotal(d.stats.avgTotal) !== null && normTotal(d.stats.avgTotal) >= 70) reasons.push({ w: normTotal(d.stats.avgTotal), text: 'High est. points' });
@@ -6839,8 +6935,11 @@ function computePickReasons(d, normTotal, normAuto, oprRankOf) {
     if (d.stats.brokeDownPct >= 25) reasons.push({ w: 200, text: `Breaks down ${Math.round(d.stats.brokeDownPct)}% of matches` });
     if (d.stats.cardCounts.Red > 0) reasons.push({ w: 300, text: 'Has drawn a red card' });
   }
-  if (d.official.opr !== null && oprRankOf[d.team]) {
-    reasons.push({ w: 60, text: `OPR ${d.official.opr.toFixed(0)} (#${oprRankOf[d.team]})` });
+  if (d.oprResolved.opr !== null) {
+    const text = d.oprResolved.source === 'season'
+      ? `Season OPR ${d.oprResolved.opr.toFixed(0)} (prev. events)`
+      : `OPR ${d.oprResolved.opr.toFixed(0)} (this event)`;
+    reasons.push({ w: d.oprResolved.source === 'season' ? 50 : 60, text });
   }
   if (d.stats.matches === 0) reasons.push({ w: -100, text: 'Not scouted yet' });
   reasons.sort((a, b) => b.w - a.w);
@@ -6880,15 +6979,15 @@ function computeSuggestedPickList() {
   const normAuto = normalizeToScale(scoutedData.map(d => d.stats.avgAuto));
   const normTip = normalizeToScale(scoutedData.map(d => d.stats.avgTipShareCount));
 
-  const ftcData = allData.filter(d => d.official.opr !== null || d.official.rank !== null || d.official.rp !== null || d.official.wins !== null);
-  const normOpr = normalizeToScale(ftcData.map(d => d.official.opr));
+  // ftcData/normOpr use the RESOLVED opr (current-event once trusted, else
+  // season fallback) so a team with only a season-OPR number still counts
+  // as having FTCScout data, and gets normalized against the same scale as
+  // everyone else instead of being silently dropped.
+  const ftcData = allData.filter(d => d.oprResolved.opr !== null || d.official.rank !== null || d.official.rp !== null || d.official.wins !== null);
+  const normOpr = normalizeToScale(ftcData.map(d => d.oprResolved.opr));
   const normRank = normalizeToScale(ftcData.map(d => d.official.rank), true); // inverted: rank 1 -> 100
   const normRp = normalizeToScale(ftcData.map(d => d.official.rp));
   const hasAnyFtcStats = ftcData.length > 0;
-
-  const oprRanked = ftcData.filter(d => d.official.opr !== null).sort((a, b) => b.official.opr - a.official.opr);
-  const oprRankOf = {};
-  oprRanked.forEach((d, i) => { oprRankOf[d.team] = i + 1; });
 
   const ourEntries = rankableMatches().filter(m => normTeam(m.teamNumber) === normTeam(ourTeamNumber));
   const ourStats = computeTeamStats(ourEntries);
@@ -6904,8 +7003,9 @@ function computeSuggestedPickList() {
     return {
       team: d.team, name: teamNameFor(d.team), score,
       scoutW: blend.scoutW, ftcW: blend.ftcW, note: blend.note,
-      flags: computePickFlags(d), reasons: computePickReasons(d, normTotal, normAuto, oprRankOf),
-      mark, matches: d.stats.matches, avgTotal: d.stats.avgTotal, opr: d.official.opr,
+      flags: computePickFlags(d), reasons: computePickReasons(d, normTotal, normAuto),
+      mark, matches: d.stats.matches, avgTotal: d.stats.avgTotal,
+      opr: d.oprResolved.opr, oprSource: d.oprResolved.source,
     };
   });
   results.sort((a, b) => {
@@ -9688,14 +9788,18 @@ async function runSelfTests() {
     // Taken-sorting — each test sets up its own minimal fixture (our team
     // #1, one candidate team #50) and restores real state in a finally.
     {
-      const pickFixtureSaved = { matches, eventData: JSON.parse(JSON.stringify(eventData)), ourTeamNumber, allianceSize, viewEventFilter, fitWithUs };
-      function pickFixture({ n = 0, teamStats = null, overrides = {} } = {}) {
+      const pickFixtureSaved = { matches, eventData: JSON.parse(JSON.stringify(eventData)), ourTeamNumber, allianceSize, viewEventFilter, fitWithUs, seasonQuickStatsCache };
+      function pickFixture({ n = 0, teamStats = null, seasonQuickStats = null, overrides = {} } = {}) {
         ourTeamNumber = '1';
         viewEventFilter = 'all';
         fitWithUs = false;
         eventData = { ...blankEventData(), eventCode: 'CT_PICK1', season: 2026, lastUpdated: new Date().toISOString(),
           teams: [{ number: '1', name: 'Us' }, { number: '50', name: 'Candidate' }],
           teamStats: teamStats === null ? { '50': { rank: 3, rp: 5, opr: 30, wins: 2, losses: 2, ties: 0 } } : teamStats };
+        // Reset by default each call (not just once) so the season fallback
+        // never leaks between tests in the same try block (e.g. the
+        // cutover-at-3-matches test calls pickFixture() twice in a row).
+        seasonQuickStatsCache = seasonQuickStats === null ? null : { season: FTCSCOUT_CURRENT_SEASON, fetchedAt: new Date().toISOString(), stats: seasonQuickStats };
         const ts = Date.now();
         matches = [];
         for (let i = 1; i <= n; i++) {
@@ -9712,6 +9816,7 @@ async function runSelfTests() {
       function pickFixtureRestore() {
         matches = pickFixtureSaved.matches; eventData = pickFixtureSaved.eventData; ourTeamNumber = pickFixtureSaved.ourTeamNumber;
         allianceSize = pickFixtureSaved.allianceSize; viewEventFilter = pickFixtureSaved.viewEventFilter; fitWithUs = pickFixtureSaved.fitWithUs;
+        seasonQuickStatsCache = pickFixtureSaved.seasonQuickStatsCache;
       }
 
       try {
@@ -9761,6 +9866,46 @@ async function runSelfTests() {
         record('Pick Score: a red card is flagged and lowers the score vs. an identical team with none', pass,
           JSON.stringify({ scoreWithoutCard, scoreWithCard: rowWithCard.score, flags: rowWithCard.flags }));
       } catch (err) { record('Pick Score: a red card is flagged and lowers the score vs. an identical team with none', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // Team has literally no current-event stats (a fresh FTCScout
+        // fetch returned nothing for it yet) but a season quickStats cache
+        // already has a number for it — that number must be used, labeled
+        // as a season fallback, not silently dropped.
+        pickFixture({ n: 3, teamStats: { '50': { rank: null, rp: null, opr: null, wins: null, losses: null, ties: null } }, seasonQuickStats: { '50': 42 } });
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = !!row && row.opr === 42 && row.oprSource === 'season' && row.score !== null;
+        record('Pick Score: no current-event stats falls back to season OPR when cached', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: no current-event stats falls back to season OPR when cached', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // Below the 3-match threshold, a real-but-thin current-event OPR is
+        // set ASIDE in favor of the (more trustworthy-at-this-sample-size)
+        // season fallback; at exactly 3 matches here, it switches straight
+        // back to the current-event number even though the same season
+        // cache is still sitting there.
+        pickFixture({ teamStats: { '50': { rank: 3, rp: 5, opr: 20, wins: 1, losses: 1, ties: 0 } }, seasonQuickStats: { '50': 55 } }); // 2 matches at event
+        const below = computeSuggestedPickList().find(r => r.team === '50');
+        pickFixture({ teamStats: { '50': { rank: 3, rp: 5, opr: 20, wins: 2, losses: 1, ties: 0 } }, seasonQuickStats: { '50': 55 } }); // 3 matches at event
+        const atCutover = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = below.opr === 55 && below.oprSource === 'season' && atCutover.opr === 20 && atCutover.oprSource === 'event';
+        record('Pick Score: current-event OPR takes over once a team has played 3+ matches here', pass, JSON.stringify({ below, atCutover }));
+      } catch (err) { record('Pick Score: current-event OPR takes over once a team has played 3+ matches here', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // No current-event stats AND the season cache explicitly came back
+        // null for this team (a real rookie, or a team with zero matches
+        // anywhere this season) — must resolve to no OPR at all, not a
+        // fabricated 0 or a crash, and the team still scores via scouting
+        // alone.
+        pickFixture({ n: 3, teamStats: { '50': { rank: null, rp: null, opr: null, wins: null, losses: null, ties: null } }, seasonQuickStats: { '50': null } });
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = !!row && row.opr === null && row.oprSource === null && row.score !== null && row.scoutW === 1 && row.ftcW === 0;
+        record('Pick Score: no current-event stats and no season data either falls back to scouting only', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: no current-event stats and no season data either falls back to scouting only', false, err.message); }
       finally { pickFixtureRestore(); }
 
       try {
@@ -9948,6 +10093,7 @@ async function runSelfTests() {
   await runMigration();
   await migrateEventCacheToIdb();
   allEventsCache = await idbGetEventCache().catch(() => null);
+  seasonQuickStatsCache = await idbGetEventCache(SEASON_QUICKSTATS_IDB_KEY).catch(() => null);
   await sweepOrphanImages();
   await preloadAllImages();
   applyRoleUI();
