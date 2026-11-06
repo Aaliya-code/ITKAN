@@ -379,7 +379,10 @@
   .spr-flag { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: var(--surface2); border: 1px solid var(--border); }
   .spr-flag-disagree { color: var(--yellow); }
   .spr-flag-redcard { color: var(--red); }
+  .spr-flag-trend-up { color: var(--green); }
+  .spr-flag-trend-down { color: var(--red); }
   .spr-why { margin-top: 2px; }
+  .spr-compare { margin-top: 2px; }
   .spr-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .rp-flag { font-size: 10px; font-weight: 700; padding: 4px 9px; border-radius: 12px; background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
   .rp-flag.hit { background: var(--yellow); color: #16181f; border-color: var(--yellow); }
@@ -586,6 +589,8 @@
   /* ── TEAM STATS GRID (task 9, Phase 4) ── */
   table.stats-grid { white-space: nowrap; font-size: 12px; }
   table.stats-grid .stat-label { font-weight: 700; color: var(--text); }
+  table.team-event-history-table td, table.team-event-history-table th { padding: 4px 8px; }
+  tr.team-event-history-current { background: var(--surface2); font-weight: 700; }
 
   /* ── SORTABLE / STICKY TABLE (Averages) ── */
   .table-scroll-card { padding: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -1096,13 +1101,17 @@
           <div><span class="tname">Fit with us</span><span class="tpoints">boosts teams strong where we're weak</span></div>
           <div class="switch" id="fitWithUsToggle"></div>
         </div>
+        <div class="toggle-row" style="margin-bottom:10px;">
+          <div><span class="tname">Compare</span><span class="tpoints">shows Season OPR / This event OPR / Trend per team</span></div>
+          <div class="switch" id="pickCompareToggle"></div>
+        </div>
         <div id="suggestedPickListRows"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;flex-wrap:wrap;gap:8px;">
           <button type="button" class="btn btn-secondary btn-sm" id="howRankedToggleBtn">How this is ranked ▾</button>
           <button type="button" class="btn btn-danger btn-sm" id="clearPickMarksBtn">Clear marks</button>
         </div>
         <div class="hint" id="howRankedNote" style="display:none;margin-top:8px;">
-          Each team gets a 0-100 Pick Score blending two things: our own scouting (average estimated points mainly, plus auto points, park reliability, tip share, driver/defense ratings, and pit capabilities — broken-down rate and cards count against it, a red card heavily) and FTCScout's cached stats (OPR mainly, then rank/RP and win-loss-tie). The more matches we've scouted for a team, the more its score leans on our own data over FTCScout's; with zero scouted matches it's FTCScout only, and with no FTCScout data at all it's scouting only. Early in an event, before a team has played 3 matches here, its OPR falls back to that team's season-wide OPR from earlier events (labeled "Season OPR" and weighted a bit less) instead of a too-thin current-event number. "⚠ Data disagree" means our numbers and FTCScout's disagree by a lot — worth a second look either way.
+          Each team gets a 0-100 Pick Score blending two things: our own scouting (average estimated points mainly, plus auto points, park reliability, tip share, driver/defense ratings, and pit capabilities — broken-down rate and cards count against it, a red card heavily) and FTCScout's cached stats (OPR mainly, then rank/RP and win-loss-tie). The FTCScout OPR number itself smoothly blends this event's own OPR with the team's most recent earlier event's OPR this season — the more matches a team's played here, the more that blend leans on this event's number over the earlier one, with no hard cutover. With no current-event matches at all, it's the earlier event's OPR alone ("Season OPR"); with no earlier event either, it's whatever this event has so far. "⚠ Data disagree" means our numbers and FTCScout's disagree by a lot — worth a second look either way. "▲ Improving"/"▼ Down" means this event's OPR is notably different from the earlier one, once there's enough of this event played to trust the comparison.
         </div>
       </div>
       <div class="card">
@@ -1594,9 +1603,9 @@ function newImageId() { return 'img_' + Date.now() + '_' + Math.random().toStrin
 // Event-picker season cache: one record per fixed key, same object store
 // (and DB/connection) as images above. idbPutEventCache()/idbGetEventCache()
 // default to the original "all events this season" key so every pre-existing
-// call site is unaffected; a second key (SEASON_QUICKSTATS_IDB_KEY) holds the
-// Suggested Pick List's per-team season-OPR fallback cache (see FTCSCOUT
-// FTCSCOUT_CURRENT_SEASON QUICKSTATS section below) in the same store.
+// call site is unaffected; a second key (TEAM_EVENT_HISTORY_IDB_KEY) holds
+// the Suggested Pick List's/By Team's per-team FTCScout event history cache
+// (see FTCSCOUT TEAM EVENT HISTORY section below) in the same store.
 const EVENT_CACHE_IDB_KEY = 'allEvents';
 function idbPutEventCache(value, key) {
   return openImageDB().then(db => new Promise((resolve, reject) => {
@@ -3685,6 +3694,68 @@ function pitInfoCardHtml(merged) {
       ${(merged.photoIds||[]).length ? `<div class="photo-grid">${merged.photoIds.map(id => `<div class="photo-slot"><img src="${esc(cachedImg(id))}"></div>`).join('')}</div>` : ''}
     </div>`;
 }
+// AwardType enum values are already PascalCase words run together
+// ("DivisionWinner", "TopRanked") — spacing them out reads fine without a
+// lookup table for all 21 of them.
+function awardLabel(a) {
+  const label = String(a.type || '').replace(/([A-Z])/g, ' $1').trim();
+  return a.placement ? `${label} #${a.placement}` : label;
+}
+// "Earlier Events vs This Event" (By Team): one row per earlier FTCScout
+// event this team's played this season (name/date, OPR, rank of N, W-L-T,
+// awards), then a highlighted "This event" row mixing FTCScout's current
+// numbers with our own scouted stats — same data teamEventHistoryCache/
+// resolveOprForTeam already use for scoring, just displayed instead of
+// blended, so a lead can see exactly what went into a team's Pick Score.
+// Omitted entirely for a team with no FTCScout event history at all cached
+// (nothing to show) or only ever at this one event (nothing EARLIER to
+// compare) — not every By Team view needs this card.
+function teamEventHistoryCardHtml(team, official, stats) {
+  const historyAll = (teamEventHistoryCache && teamEventHistoryCache.byTeam && teamEventHistoryCache.byTeam[team]) || null;
+  if (!historyAll || !historyAll.length) return '';
+  const earlier = historyAll.filter(e => e.code !== eventData.eventCode).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  if (!earlier.length) return '';
+  const oprResolved = resolveOprForTeam(team, official);
+  const rows = earlier.map(e => `
+    <tr>
+      <td>${esc(e.name)}<div class="hint" style="font-size:11px;">${esc(e.start || '')}</div></td>
+      <td class="num">${e.opr === null ? '—' : e.opr.toFixed(1)}</td>
+      <td class="num">${e.rank === null ? '—' : `${e.rank}${e.teamCount ? ' of ' + e.teamCount : ''}`}</td>
+      <td class="num">${e.wins === null ? '—' : `${e.wins}-${e.losses}-${e.ties}`}</td>
+      <td>${e.awards.length ? e.awards.map(a => esc(awardLabel(a))).join(', ') : '—'}</td>
+    </tr>`).join('');
+  const scoutedText = stats.matches
+    ? `Scouted: ${stats.total.avg.toFixed(0)} pts, ${stats.auto.avg.toFixed(0)} auto, ${stats.parkPct.toFixed(0)}% park${(stats.cardCounts.Yellow || stats.cardCounts.Red) ? `, ${stats.cardCounts.Yellow}Y/${stats.cardCounts.Red}R` : ''}`
+    : 'Not scouted yet';
+  const thisRow = `
+    <tr class="team-event-history-current">
+      <td>This event</td>
+      <td class="num">${official.opr === null ? '—' : official.opr.toFixed(1)}</td>
+      <td class="num">${official.rank === null ? '—' : official.rank}</td>
+      <td class="num">${official.wins === null ? '—' : `${official.wins}-${official.losses}-${official.ties}`}</td>
+      <td>${esc(scoutedText)}</td>
+    </tr>`;
+  let summary = '';
+  if (oprResolved.source === 'blend') {
+    const diff = oprResolved.currentOpr - oprResolved.earlierOpr;
+    const arrow = diff >= 0 ? '▲' : '▼';
+    summary = `OPR ${diff >= 0 ? 'up' : 'down'} ${Math.abs(diff).toFixed(0)} vs season (${arrow})`;
+  }
+  const updatedNote = teamEventHistoryCache.fetchedAt ? `Earlier-event data updated ${new Date(teamEventHistoryCache.fetchedAt).toLocaleString()}.` : '';
+  return `
+    <div class="card">
+      <div class="card-title">Earlier Events vs This Event</div>
+      <div class="table-scroll-card" style="margin:0 -14px;">
+        <table class="stats-grid team-event-history-table">
+          <tr><th>Event</th><th class="num">OPR</th><th class="num">Rank</th><th class="num">W-L-T</th><th>Award</th></tr>
+          ${rows}
+          ${thisRow}
+        </table>
+      </div>
+      ${summary ? `<div class="hint" style="margin-top:6px;">${esc(summary)}</div>` : ''}
+      ${updatedNote ? `<div class="hint" style="margin-top:2px;">${esc(updatedNote)}</div>` : ''}
+    </div>`;
+}
 
 function renderTeamDetail() {
   const sel = document.getElementById('teamSelect');
@@ -3745,6 +3816,7 @@ function renderTeamDetail() {
       </div>
       ${scoutedBlock}
     </div>
+    ${teamEventHistoryCardHtml(team, official, stats)}
     ${pitInfoCardHtml(mergedPit)}
     <div class="card">
       <div class="card-title">Auto Paths &amp; Start Positions</div>
@@ -5384,36 +5456,63 @@ const EVENT_STATS_QUERY = `query($season: Int!, $code: String!) {
     teams { team { number } stats { ... on TeamEventStats2026 { rank rp wins losses ties opr { totalPointsNp } } } }
   }
 }`;
-/* ══════════ FTCSCOUT SEASON QUICKSTATS (Suggested Pick List fallback) ══════════
-   VERIFIED 2026-11-05 against the live API via schema introspection + real
-   queries: `Team.quickStats(season: Int!, region: RegionOption)` is a
-   SEASON-WIDE aggregate (confirmed by querying a past, completed season —
-   2025 — and getting a real non-null value, then confirming teams with no
-   2026 matches yet get `quickStats(season: 2026) == null`), distinct from
-   `eventByCode.teams[].stats` above (which is event-specific). It returns
-   `{ tot, auto, dc, eg }`, each a `{value, rank}` QuickStat, plus a `count`
-   field — empirically confirmed `count` is NOT this team's match count (every
-   team queried for the same season came back with the IDENTICAL `count`,
-   e.g. 1331 — it's a pool-size denominator behind `rank`, not per-team), so
-   only `tot.value` is used here as "season OPR"; the per-event match count
-   used for the 3-match cutover comes from the event stats above instead
-   (wins+losses+ties), not from this at all.
-   There is no batch "teams(numbers:[...])" query in the schema — only
-   `teamByNumber(number: Int!)` singular — so all of an event's ~40 teams are
-   fetched in exactly ONE HTTP request via GraphQL aliasing (`t123:
-   teamByNumber(number: 123) { ... }` repeated per team in one query string),
-   not 40 separate round trips. */
-async function fetchSeasonQuickStatsFor(teamNumbers) {
+/* ══════════ FTCSCOUT TEAM EVENT HISTORY (Suggested Pick List + By Team) ══════════
+   VERIFIED 2026-11-06 against the live API via schema introspection + real
+   queries. An earlier version of this fallback used `Team.quickStats(season)`
+   (a season-wide aggregate) — but that aggregate INCLUDES whatever a team has
+   played at the CURRENT event too, so once matches start happening here it's
+   no longer "previous events," and labeling it that way would be wrong. This
+   version instead walks `Team.events(season)`, whose list items are type
+   `TeamEventParticipation` — confirmed via introspection to have `event`
+   (name/code/start/finished/teams, for "rank of N"), `stats` (the SAME
+   per-event `TeamEventStats` union eventByCode.teams[].stats already uses —
+   same inline fragment), and `awards`, all on ONE object. So a team's full
+   season event-by-event history — including a TRUE "earlier events only"
+   OPR, not a blended season aggregate — comes from ONE query per team,
+   batched for ~40 teams into ONE HTTP request via GraphQL aliasing (`t123:
+   teamByNumber(number: 123) { events(season: $season) { ... } }` repeated per
+   team), same batching approach as before. Confirmed end-to-end against a
+   real team with real event history (two 2026 events, one finished with
+   real stats, one upcoming with stats: null) before relying on this shape.
+   "Earlier" is decided at READ time (resolveOprForTeam()/
+   mostRecentFinishedEarlierEvent() filter out the CURRENT event's own code),
+   not at fetch time, so the cache stays valid/reusable if the lead switches
+   which event is selected. */
+async function fetchTeamEventHistoryFor(teamNumbers) {
   const nums = [...new Set(teamNumbers.map(t => Number(t)).filter(n => Number.isFinite(n) && n > 0))];
   if (!nums.length) return {};
-  const query = `query($season: Int!) { ${nums.map(n => `t${n}: teamByNumber(number: ${n}) { quickStats(season: $season) { tot { value } } }`).join(' ')} }`;
+  const query = `query($season: Int!) { ${nums.map(n => `t${n}: teamByNumber(number: ${n}) { events(season: $season) { event { code name start finished teams { team { number } } } stats { ... on TeamEventStats2026 { opr { totalPointsNp } rank rp wins losses ties } } awards { type placement } } }`).join(' ')} }`;
   const data = await ftcscoutQuery(query, { season: FTCSCOUT_CURRENT_SEASON });
   const out = {};
   nums.forEach(n => {
     const entry = data && data['t' + n];
-    out[String(n)] = (entry && entry.quickStats && entry.quickStats.tot) ? entry.quickStats.tot.value : null;
+    const events = (entry && entry.events) || [];
+    out[String(n)] = events.filter(e => e.event).map(e => ({
+      code: e.event.code, name: e.event.name, start: e.event.start, finished: e.event.finished,
+      teamCount: (e.event.teams || []).length,
+      opr: (e.stats && e.stats.opr && e.stats.opr.totalPointsNp != null) ? e.stats.opr.totalPointsNp : null,
+      rank: (e.stats && e.stats.rank != null) ? e.stats.rank : null,
+      rp: (e.stats && e.stats.rp != null) ? e.stats.rp : null,
+      wins: (e.stats && e.stats.wins != null) ? e.stats.wins : null,
+      losses: (e.stats && e.stats.losses != null) ? e.stats.losses : null,
+      ties: (e.stats && e.stats.ties != null) ? e.stats.ties : null,
+      awards: (e.awards || []).map(a => ({ type: a.type, placement: a.placement })),
+    }));
   });
   return out;
+}
+// The most recent FINISHED event this team has OPR for, excluding the
+// currently-selected event — recency over peak performance, since a team's
+// robot and driving typically change (improve, or break) over a season, so
+// their latest showing predicts current strength better than their single
+// best result from earlier (which could be an outlier from an older build).
+function mostRecentFinishedEarlierEvent(team) {
+  const history = teamEventHistoryCache && teamEventHistoryCache.byTeam && teamEventHistoryCache.byTeam[team];
+  if (!history) return null;
+  const earlier = history.filter(e => e.code !== eventData.eventCode && e.finished && e.opr !== null);
+  if (!earlier.length) return null;
+  earlier.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  return earlier[0];
 }
 /* ══════════ EVENT PICKER (Settings > Event Data, Lead only) ══════════
    Picking an event used to mean leaving the app to look up a code/name on
@@ -5472,11 +5571,12 @@ const LS_RECENT_EVENTS = 'biobuzz2026_recentevents';
 // picker only ever reads this from a user-initiated tap (Pick Event...),
 // well after init has had time to finish, so the brief gap is harmless.
 let allEventsCache = null;
-// Suggested Pick List's season-OPR fallback cache, keyed in the same
-// IndexedDB store as allEventsCache above (SEASON_QUICKSTATS_IDB_KEY) so it
-// works fully offline once fetched; { season, fetchedAt, stats: {teamNumber: oprValueOrNull} }.
-const SEASON_QUICKSTATS_IDB_KEY = 'seasonQuickStats';
-let seasonQuickStatsCache = null;
+// Suggested Pick List's/By Team's per-team FTCScout event history cache,
+// keyed in the same IndexedDB store as allEventsCache above
+// (TEAM_EVENT_HISTORY_IDB_KEY) so it works fully offline once fetched;
+// { season, fetchedAt, byTeam: {teamNumber: [eventHistoryEntry, ...]} }.
+const TEAM_EVENT_HISTORY_IDB_KEY = 'teamEventHistory';
+let teamEventHistoryCache = null;
 let ourEventsCache = (() => { try { return JSON.parse(localStorage.getItem(LS_EVENT_CACHE_OURS)) || null; } catch(e) { return null; } })();
 let recentEvents = (() => { try { return JSON.parse(localStorage.getItem(LS_RECENT_EVENTS)) || []; } catch(e) { return []; } })();
 // Moves a pre-existing LS_EVENT_CACHE_ALL localStorage copy (from before
@@ -5741,30 +5841,25 @@ async function fetchEventData(silent) {
       };
     });
   } catch (err) { /* rank/RP/OPR/W-L-T left as whatever was cached before — not fatal, core event data above is unaffected */ }
-  // Season-OPR fallback for the Suggested Pick List: only fetched for teams
-  // still thin on current-event data (fewer than 3 matches played here, the
-  // same threshold the scoring layer uses to decide whether to trust
-  // current-event OPR at all) — a team already past that threshold never
-  // needs it, so a later silent 5-min refresh re-fetches a shrinking set as
-  // teams play more matches, not the whole field every time. Best-effort:
-  // failure here must not block the event/stats fetch above, and never
-  // clears whatever was cached from a previous successful fetch.
+  // Per-team FTCScout event history, for the Suggested Pick List's
+  // earlier-event OPR fallback AND the By Team "Earlier Events vs This
+  // Event" section — fetched for every event team (not just thin-data ones,
+  // since By Team wants a team's history regardless of how many matches
+  // it's played here) on event pick and on the silent 5-min refresh.
+  // Best-effort: failure here must not block the event/stats fetch above,
+  // and never clears whatever was cached from a previous successful fetch.
   try {
-    const needsFallback = (eventData.teams || []).map(t => normTeam(t.number)).filter(n => {
-      const s = eventData.teamStats[n];
-      const matchesHere = (s && s.wins != null) ? s.wins + s.losses + s.ties : 0;
-      return matchesHere < 3;
-    });
-    if (needsFallback.length) {
-      const fetched = await fetchSeasonQuickStatsFor(needsFallback);
-      seasonQuickStatsCache = {
+    const teamNumbers = (eventData.teams || []).map(t => normTeam(t.number));
+    if (teamNumbers.length) {
+      const fetched = await fetchTeamEventHistoryFor(teamNumbers);
+      teamEventHistoryCache = {
         season: FTCSCOUT_CURRENT_SEASON,
         fetchedAt: new Date().toISOString(),
-        stats: { ...(seasonQuickStatsCache ? seasonQuickStatsCache.stats : {}), ...fetched },
+        byTeam: { ...(teamEventHistoryCache ? teamEventHistoryCache.byTeam : {}), ...fetched },
       };
-      try { await idbPutEventCache(seasonQuickStatsCache, SEASON_QUICKSTATS_IDB_KEY); } catch(e) {}
+      try { await idbPutEventCache(teamEventHistoryCache, TEAM_EVENT_HISTORY_IDB_KEY); } catch(e) {}
     }
-  } catch (err) { /* season-OPR fallback is best-effort — current-event data and the scouting-only fallback still work without it */ }
+  } catch (err) { /* team event history is best-effort — current-event data and the scouting-only fallback still work without it */ }
   if (coreOk) eventData.lastUpdated = new Date().toISOString();
   saveEventData();
   renderSchedulePreview();
@@ -6789,26 +6884,41 @@ function pickListCandidates() {
   const ourNorm = normTeam(ourTeamNumber);
   return getEventTeamList().filter(t => t.n !== ourNorm);
 }
-// The Pick Score's OPR number prefers the CURRENT event's own OPR once a
-// team has played enough matches here to trust it (3+, the same threshold
-// the "Low data" flag uses for scouting) — below that, it falls back to the
-// team's season-wide OPR from Team.quickStats (fetched by
-// fetchSeasonQuickStatsFor(), cached in seasonQuickStatsCache so this works
-// offline), since early in an event is exactly when current-event data is
-// thinnest for everyone. A team with neither (true rookie, or the season
-// cache hasn't been fetched yet) resolves to source: null, handled
-// identically to "no FTCScout data" everywhere downstream.
+// The Pick Score's OPR number smoothly blends the CURRENT event's own OPR
+// with the team's most recent FINISHED EARLIER event's OPR (see
+// mostRecentFinishedEarlierEvent() above) — currentWeight = m/(m+3), where m
+// = matches played at THIS event, the same shape as the scouting blend's
+// n/(n+3). m=0 -> pure earlier-event OPR; as m grows, current-event OPR
+// dominates but never fully excludes the earlier number. This mirrors why
+// early in an event is exactly when current-event data is thinnest for
+// everyone: a team that's played 1 match here still mostly leans on what we
+// already know about them.
+//   - Current data but no earlier event at all (rookie, or no FINISHED
+//     earlier event yet) -> current only (source 'event').
+//   - No current-event stats at all but a real earlier event exists ->
+//     earlier only (source 'season' — "Season OPR (prev. events)" is an
+//     accurate label here since it genuinely excludes the current event).
+//   - Both exist -> blended (source 'blend'), and the "why" line shows both
+//     numbers so a lead can see the blend, not just its result.
+//   - Neither -> null, handled identically to "no FTCScout data" everywhere
+//     downstream.
 function resolveOprForTeam(team, official) {
   const matchesAtEvent = (official.wins !== null) ? official.wins + official.losses + official.ties : 0;
-  if (official.opr !== null && matchesAtEvent >= 3) {
-    return { opr: official.opr, source: 'event', matchesAtEvent };
+  const earlierEvent = mostRecentFinishedEarlierEvent(team);
+  const earlierOpr = earlierEvent ? earlierEvent.opr : null;
+  const currentOpr = official.opr;
+  if (currentOpr !== null && earlierOpr !== null) {
+    const currentWeight = matchesAtEvent / (matchesAtEvent + 3);
+    const opr = currentWeight * currentOpr + (1 - currentWeight) * earlierOpr;
+    return { opr, source: 'blend', currentWeight, currentOpr, earlierOpr, earlierEvent, matchesAtEvent };
   }
-  const seasonStats = seasonQuickStatsCache && seasonQuickStatsCache.stats;
-  const seasonOpr = seasonStats ? seasonStats[team] : undefined;
-  if (seasonOpr !== undefined && seasonOpr !== null) {
-    return { opr: seasonOpr, source: 'season', matchesAtEvent };
+  if (currentOpr !== null) {
+    return { opr: currentOpr, source: 'event', currentWeight: 1, currentOpr, earlierOpr: null, earlierEvent: null, matchesAtEvent };
   }
-  return { opr: official.opr, source: official.opr !== null ? 'event' : null, matchesAtEvent };
+  if (earlierOpr !== null) {
+    return { opr: earlierOpr, source: 'season', currentWeight: 0, currentOpr: null, earlierOpr, earlierEvent, matchesAtEvent };
+  }
+  return { opr: null, source: null, currentWeight: null, currentOpr: null, earlierOpr: null, earlierEvent: null, matchesAtEvent };
 }
 function pickListRawData(team) {
   const entries = rankableMatches().filter(m => normTeam(m.teamNumber) === team);
@@ -6851,20 +6961,23 @@ function scoutingCompositeRaw(d, normTotal, normAuto, normTip) {
   return Math.max(0, Math.min(100, base - brokenPenalty - cardPenalty));
 }
 // The FTCScout-side composite (0-100, null if this team has no official
-// stats at all, current-event OR season-fallback). OPR is the main factor —
-// using d.oprResolved (current-event OPR once 3+ matches played here, else
-// the team's season OPR) rather than the raw current-event value, so a
-// team still thin on current-event data isn't scored as if it had none at
-// all. A season-fallback OPR counts for a bit less than a real current-event
-// one (0.45 vs 0.6) — it's a real signal, just a noisier one for THIS
-// event's bracket of teams. Rank/RP/win% always come from the current
-// event only (quickStats has no event-specific rank/RP to fall back to).
+// stats at all, current-event OR earlier-event). OPR is the main factor —
+// using d.oprResolved's blended value (see resolveOprForTeam) rather than
+// the raw current-event value, so a team still thin on current-event data
+// isn't scored as if it had none at all. The OPR sub-weight itself scales
+// smoothly with how much of that blend is current-vs-earlier (0.45 at pure
+// earlier-event, up to 0.6 at pure current-event) — the same "no hard
+// cutover" principle as the OPR blend itself, so the composite doesn't
+// jump discontinuously as a team crosses the 3-match mark. Rank/RP/win%
+// always come from the current event only (an earlier event's own rank/RP
+// isn't comparable to this event's field).
 function ftcCompositeRaw(d, normOpr, normRank, normRp) {
   const off = d.official;
   if (d.oprResolved.opr === null && off.rank === null && off.rp === null && off.wins === null) return null;
   const winPct = (off.wins !== null && (off.wins + off.losses + off.ties) > 0)
     ? off.wins / (off.wins + off.losses + off.ties) * 100 : null;
-  const oprWeight = d.oprResolved.source === 'season' ? 0.45 : 0.6;
+  const oprWeight = d.oprResolved.source === null ? 0.6
+    : 0.45 + (d.oprResolved.currentWeight || 0) * 0.15;
   const parts = [
     [normOpr(d.oprResolved.opr), oprWeight],
     [normRank(off.rank), 0.2],
@@ -6918,13 +7031,26 @@ function computePickFlags(d) {
   if (d.stats.cardCounts.Red > 0) flags.push({ key: 'redcard', label: '🟥 Red card' });
   return flags;
 }
+// Trend tag: this event's current OPR vs. the earlier-event OPR it's being
+// blended against, shown only once there's enough current-event sample to
+// trust the comparison (m >= 3, the same threshold "Low data" uses) AND
+// both numbers actually exist (a pure 'event'- or 'season'-only resolution
+// has nothing to compare against). A separate concept from the data-quality
+// flags above — this is about change over time, not confidence.
+function computeTrendTag(oprResolved) {
+  if (oprResolved.matchesAtEvent < 3) return null;
+  if (oprResolved.currentOpr === null || oprResolved.earlierOpr === null) return null;
+  const diffPct = (oprResolved.currentOpr - oprResolved.earlierOpr) / Math.max(oprResolved.earlierOpr, 1);
+  if (diffPct > 0.15) return { key: 'up', label: '▲ Improving' };
+  if (diffPct < -0.15) return { key: 'down', label: '▼ Down' };
+  return null;
+}
 // Top 2-3 human-readable reasons behind a team's rank, picking whichever
 // factors most pushed its composite up (or, for penalties, down) relative
-// to the field. The OPR reason labels where the number came from — "OPR 48
-// (this event)" vs "Season OPR 41 (prev. events)" — so a lead never
-// mistakes an older, less event-specific number for a current one; the
-// season version weighs a little less in case the composite is tight
-// against other reasons.
+// to the field. The OPR reason labels where the number(s) came from — both
+// numbers when both exist ("OPR 48 here · 41 season"), or "OPR 48 (this
+// event)" / "Season OPR 41 (prev. events)" when only one does — so a lead
+// never mistakes an older, less event-specific number for a current one.
 function computePickReasons(d, normTotal, normAuto) {
   const reasons = [];
   if (d.stats.matches > 0) {
@@ -6936,9 +7062,10 @@ function computePickReasons(d, normTotal, normAuto) {
     if (d.stats.cardCounts.Red > 0) reasons.push({ w: 300, text: 'Has drawn a red card' });
   }
   if (d.oprResolved.opr !== null) {
-    const text = d.oprResolved.source === 'season'
-      ? `Season OPR ${d.oprResolved.opr.toFixed(0)} (prev. events)`
-      : `OPR ${d.oprResolved.opr.toFixed(0)} (this event)`;
+    let text;
+    if (d.oprResolved.source === 'blend') text = `OPR ${d.oprResolved.currentOpr.toFixed(0)} here · ${d.oprResolved.earlierOpr.toFixed(0)} season`;
+    else if (d.oprResolved.source === 'season') text = `Season OPR ${d.oprResolved.opr.toFixed(0)} (prev. events)`;
+    else text = `OPR ${d.oprResolved.opr.toFixed(0)} (this event)`;
     reasons.push({ w: d.oprResolved.source === 'season' ? 50 : 60, text });
   }
   if (d.stats.matches === 0) reasons.push({ w: -100, text: 'Not scouted yet' });
@@ -6970,6 +7097,7 @@ function computeFitBoost(ourStats, theirStats) {
   return Math.min(boost, 20); // total boost capped at +20
 }
 let fitWithUs = false;
+let pickCompare = false; // "Compare" toggle: adds a Season OPR | This event OPR | Trend line per row
 const LS_PICK_MARK_SORT = { taken: 1, donotpick: 1, '': 0 }; // marked teams sort after unmarked, regardless of score
 function computeSuggestedPickList() {
   const candidates = pickListCandidates();
@@ -7004,8 +7132,10 @@ function computeSuggestedPickList() {
       team: d.team, name: teamNameFor(d.team), score,
       scoutW: blend.scoutW, ftcW: blend.ftcW, note: blend.note,
       flags: computePickFlags(d), reasons: computePickReasons(d, normTotal, normAuto),
+      trend: computeTrendTag(d.oprResolved),
       mark, matches: d.stats.matches, avgTotal: d.stats.avgTotal,
       opr: d.oprResolved.opr, oprSource: d.oprResolved.source,
+      currentOpr: d.oprResolved.currentOpr, earlierOpr: d.oprResolved.earlierOpr,
     };
   });
   results.sort((a, b) => {
@@ -7056,8 +7186,9 @@ function renderSuggestedPickList() {
         <span class="spr-score">${r.score === null ? '—' : r.score.toFixed(0)}</span>
       </div>
       ${weightPct !== null ? `<div class="spr-weight hint">Scout ${weightPct}% · FTCScout ${100 - weightPct}%</div>` : ''}
-      ${r.flags.length ? `<div class="spr-flags">${r.flags.map(f => `<span class="spr-flag spr-flag-${f.key}">${esc(f.label)}</span>`).join('')}</div>` : ''}
+      ${r.flags.length || r.trend ? `<div class="spr-flags">${r.flags.map(f => `<span class="spr-flag spr-flag-${f.key}">${esc(f.label)}</span>`).join('')}${r.trend ? `<span class="spr-flag spr-flag-trend-${r.trend.key}">${esc(r.trend.label)}</span>` : ''}</div>` : ''}
       ${r.reasons.length ? `<div class="hint spr-why">${r.reasons.map(esc).join(' · ')}</div>` : ''}
+      ${pickCompare ? `<div class="hint spr-compare">Season ${r.earlierOpr === null ? '—' : r.earlierOpr.toFixed(0)} · This event ${r.currentOpr === null ? '—' : r.currentOpr.toFixed(0)}${r.trend ? ' · ' + esc(r.trend.label) : ''}</div>` : ''}
       ${marked === 'donotpick' && r.mark.reason ? `<div class="hint spr-why">Do Not Pick: ${esc(r.mark.reason)}</div>` : ''}
       <div class="spr-actions">
         <button class="pick-btn add" data-suggested-add="${esc(r.team)}" ${pickList.includes(r.team) || pickList.length >= max ? 'disabled style="opacity:.3"' : ''}>+</button>
@@ -7088,6 +7219,12 @@ document.getElementById('fitWithUsToggle').classList.toggle('on', fitWithUs);
 document.getElementById('fitWithUsToggle').addEventListener('click', (e) => {
   fitWithUs = !fitWithUs;
   e.currentTarget.classList.toggle('on', fitWithUs);
+  renderSuggestedPickList();
+});
+document.getElementById('pickCompareToggle').classList.toggle('on', pickCompare);
+document.getElementById('pickCompareToggle').addEventListener('click', (e) => {
+  pickCompare = !pickCompare;
+  e.currentTarget.classList.toggle('on', pickCompare);
   renderSuggestedPickList();
 });
 document.getElementById('howRankedToggleBtn').addEventListener('click', () => {
@@ -9788,18 +9925,17 @@ async function runSelfTests() {
     // Taken-sorting — each test sets up its own minimal fixture (our team
     // #1, one candidate team #50) and restores real state in a finally.
     {
-      const pickFixtureSaved = { matches, eventData: JSON.parse(JSON.stringify(eventData)), ourTeamNumber, allianceSize, viewEventFilter, fitWithUs, seasonQuickStatsCache };
-      function pickFixture({ n = 0, teamStats = null, seasonQuickStats = null, overrides = {} } = {}) {
+      const pickFixtureSaved = { matches, eventData: JSON.parse(JSON.stringify(eventData)), ourTeamNumber, allianceSize, viewEventFilter, fitWithUs, teamEventHistoryCache };
+      function pickFixture({ n = 0, teamStats = null, teamEventHistory = null, overrides = {} } = {}) {
         ourTeamNumber = '1';
         viewEventFilter = 'all';
         fitWithUs = false;
         eventData = { ...blankEventData(), eventCode: 'CT_PICK1', season: 2026, lastUpdated: new Date().toISOString(),
           teams: [{ number: '1', name: 'Us' }, { number: '50', name: 'Candidate' }],
           teamStats: teamStats === null ? { '50': { rank: 3, rp: 5, opr: 30, wins: 2, losses: 2, ties: 0 } } : teamStats };
-        // Reset by default each call (not just once) so the season fallback
-        // never leaks between tests in the same try block (e.g. the
-        // cutover-at-3-matches test calls pickFixture() twice in a row).
-        seasonQuickStatsCache = seasonQuickStats === null ? null : { season: FTCSCOUT_CURRENT_SEASON, fetchedAt: new Date().toISOString(), stats: seasonQuickStats };
+        // Reset by default each call (not just once) so the earlier-event
+        // history never leaks between tests in the same try block.
+        teamEventHistoryCache = teamEventHistory === null ? null : { season: FTCSCOUT_CURRENT_SEASON, fetchedAt: new Date().toISOString(), byTeam: teamEventHistory };
         const ts = Date.now();
         matches = [];
         for (let i = 1; i <= n; i++) {
@@ -9816,7 +9952,7 @@ async function runSelfTests() {
       function pickFixtureRestore() {
         matches = pickFixtureSaved.matches; eventData = pickFixtureSaved.eventData; ourTeamNumber = pickFixtureSaved.ourTeamNumber;
         allianceSize = pickFixtureSaved.allianceSize; viewEventFilter = pickFixtureSaved.viewEventFilter; fitWithUs = pickFixtureSaved.fitWithUs;
-        seasonQuickStatsCache = pickFixtureSaved.seasonQuickStatsCache;
+        teamEventHistoryCache = pickFixtureSaved.teamEventHistoryCache;
       }
 
       try {
@@ -9869,44 +10005,74 @@ async function runSelfTests() {
       finally { pickFixtureRestore(); }
 
       try {
-        // Team has literally no current-event stats (a fresh FTCScout
-        // fetch returned nothing for it yet) but a season quickStats cache
-        // already has a number for it — that number must be used, labeled
-        // as a season fallback, not silently dropped.
-        pickFixture({ n: 3, teamStats: { '50': { rank: null, rp: null, opr: null, wins: null, losses: null, ties: null } }, seasonQuickStats: { '50': 42 } });
+        // Direct test of resolveOprForTeam()'s smooth blend math at
+        // m=0/3/10 — isolates the formula (currentWeight = m/(m+3)) from
+        // the rest of the pipeline. Current OPR 20, earlier-event OPR 50:
+        // m=0 -> pure earlier (50); m=3 -> half-and-half (35);
+        // m=10 -> mostly current (10/13*20 + 3/13*50 ≈ 26.9).
+        eventData = { ...blankEventData(), eventCode: 'CT_BLEND', season: 2026 };
+        teamEventHistoryCache = { season: 2026, fetchedAt: new Date().toISOString(), byTeam: { '50': [
+          { code: 'EARLIER1', name: 'Earlier Event', start: '2026-09-01', finished: true, teamCount: 20, opr: 50, rank: 2, rp: 8, wins: 4, losses: 1, ties: 0, awards: [] },
+        ] } };
+        const off = (wins) => ({ rank: 3, rp: 5, opr: 20, wins, losses: 0, ties: 0 });
+        const m0 = resolveOprForTeam('50', off(0));
+        const m3 = resolveOprForTeam('50', off(3));
+        const m10 = resolveOprForTeam('50', off(10));
+        const expected10 = (10/13)*20 + (3/13)*50;
+        const pass = Math.abs(m0.opr - 50) < 0.01 && Math.abs(m3.opr - 35) < 0.01 && Math.abs(m10.opr - expected10) < 0.01
+          && m0.source === 'blend' && m3.source === 'blend' && m10.source === 'blend';
+        record('Pick Score: OPR blend at m=0/3/10 follows currentWeight = m/(m+3)', pass, JSON.stringify({ m0, m3, m10, expected10 }));
+      } catch (err) { record('Pick Score: OPR blend at m=0/3/10 follows currentWeight = m/(m+3)', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // A rookie (or any team with no cached earlier-event history at
+        // all) with real current-event stats uses the current-event OPR
+        // alone — nothing to blend against, so no season/earlier number
+        // should appear.
+        pickFixture({ n: 3, teamStats: { '50': { rank: 3, rp: 5, opr: 20, wins: 2, losses: 1, ties: 0 } } });
         const row = computeSuggestedPickList().find(r => r.team === '50');
-        const pass = !!row && row.opr === 42 && row.oprSource === 'season' && row.score !== null;
-        record('Pick Score: no current-event stats falls back to season OPR when cached', pass, JSON.stringify(row));
-      } catch (err) { record('Pick Score: no current-event stats falls back to season OPR when cached', false, err.message); }
+        const pass = !!row && row.opr === 20 && row.oprSource === 'event' && row.earlierOpr === null;
+        record('Pick Score: a rookie with no earlier-event history uses current-event OPR alone', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: a rookie with no earlier-event history uses current-event OPR alone', false, err.message); }
       finally { pickFixtureRestore(); }
 
       try {
-        // Below the 3-match threshold, a real-but-thin current-event OPR is
-        // set ASIDE in favor of the (more trustworthy-at-this-sample-size)
-        // season fallback; at exactly 3 matches here, it switches straight
-        // back to the current-event number even though the same season
-        // cache is still sitting there.
-        pickFixture({ teamStats: { '50': { rank: 3, rp: 5, opr: 20, wins: 1, losses: 1, ties: 0 } }, seasonQuickStats: { '50': 55 } }); // 2 matches at event
-        const below = computeSuggestedPickList().find(r => r.team === '50');
-        pickFixture({ teamStats: { '50': { rank: 3, rp: 5, opr: 20, wins: 2, losses: 1, ties: 0 } }, seasonQuickStats: { '50': 55 } }); // 3 matches at event
-        const atCutover = computeSuggestedPickList().find(r => r.team === '50');
-        const pass = below.opr === 55 && below.oprSource === 'season' && atCutover.opr === 20 && atCutover.oprSource === 'event';
-        record('Pick Score: current-event OPR takes over once a team has played 3+ matches here', pass, JSON.stringify({ below, atCutover }));
-      } catch (err) { record('Pick Score: current-event OPR takes over once a team has played 3+ matches here', false, err.message); }
-      finally { pickFixtureRestore(); }
-
-      try {
-        // No current-event stats AND the season cache explicitly came back
-        // null for this team (a real rookie, or a team with zero matches
-        // anywhere this season) — must resolve to no OPR at all, not a
-        // fabricated 0 or a crash, and the team still scores via scouting
-        // alone.
-        pickFixture({ n: 3, teamStats: { '50': { rank: null, rp: null, opr: null, wins: null, losses: null, ties: null } }, seasonQuickStats: { '50': null } });
+        // No current-event stats AND no earlier-event history either —
+        // must resolve to no OPR at all, not a fabricated 0 or a crash,
+        // and the team still scores via scouting alone.
+        pickFixture({ n: 3, teamStats: { '50': { rank: null, rp: null, opr: null, wins: null, losses: null, ties: null } } });
         const row = computeSuggestedPickList().find(r => r.team === '50');
         const pass = !!row && row.opr === null && row.oprSource === null && row.score !== null && row.scoutW === 1 && row.ftcW === 0;
-        record('Pick Score: no current-event stats and no season data either falls back to scouting only', pass, JSON.stringify(row));
-      } catch (err) { record('Pick Score: no current-event stats and no season data either falls back to scouting only', false, err.message); }
+        record('Pick Score: no current-event stats and no earlier-event history either falls back to scouting only', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: no current-event stats and no earlier-event history either falls back to scouting only', false, err.message); }
       finally { pickFixtureRestore(); }
+
+      try {
+        // Trend tag: fires on a >15% swing between this event's OPR and
+        // the earlier one, but only once m >= 3 (same threshold as "Low
+        // data") — a big swing on a 1-2 match sample isn't trustworthy
+        // enough to call a trend yet.
+        const up = computeTrendTag({ matchesAtEvent: 3, currentOpr: 30, earlierOpr: 20 }); // +50%
+        const down = computeTrendTag({ matchesAtEvent: 3, currentOpr: 20, earlierOpr: 30 }); // -33%
+        const flat = computeTrendTag({ matchesAtEvent: 3, currentOpr: 21, earlierOpr: 20 }); // +5%, under threshold
+        const tooFewMatches = computeTrendTag({ matchesAtEvent: 2, currentOpr: 40, earlierOpr: 20 }); // +100%, but m<3
+        const pass = !!up && up.key === 'up' && !!down && down.key === 'down' && flat === null && tooFewMatches === null;
+        record('Pick Score: trend tag fires on a >15% OPR swing only once m>=3', pass, JSON.stringify({ up, down, flat, tooFewMatches }));
+      } catch (err) { record('Pick Score: trend tag fires on a >15% OPR swing only once m>=3', false, err.message); }
+
+      try {
+        // The "why" line labels where the OPR number(s) came from: both
+        // numbers when both exist, otherwise whichever single source
+        // applies, worded so a lead can't mistake one for the other.
+        const baseStats = { matches: 0, avgTotal: 0, avgAuto: 0, parkPct: 0, avgRatingDriver: null, brokeDownPct: 0, cardCounts: { Yellow: 0, Red: 0 } };
+        const identity = v => v;
+        const blendText = computePickReasons({ stats: baseStats, oprResolved: { opr: 35, source: 'blend', currentOpr: 20, earlierOpr: 50 } }, identity, identity).find(t => t.includes('OPR'));
+        const seasonText = computePickReasons({ stats: baseStats, oprResolved: { opr: 50, source: 'season', currentOpr: null, earlierOpr: 50 } }, identity, identity).find(t => t.includes('OPR'));
+        const eventText = computePickReasons({ stats: baseStats, oprResolved: { opr: 20, source: 'event', currentOpr: 20, earlierOpr: null } }, identity, identity).find(t => t.includes('OPR'));
+        const pass = blendText === 'OPR 20 here · 50 season' && seasonText === 'Season OPR 50 (prev. events)' && eventText === 'OPR 20 (this event)';
+        record('Pick Score: "why" line labels OPR provenance (blend/season-only/event-only)', pass, JSON.stringify({ blendText, seasonText, eventText }));
+      } catch (err) { record('Pick Score: "why" line labels OPR provenance (blend/season-only/event-only)', false, err.message); }
 
       try {
         // Two candidates: #50 genuinely scores higher than #51, but #50 is
@@ -10093,7 +10259,7 @@ async function runSelfTests() {
   await runMigration();
   await migrateEventCacheToIdb();
   allEventsCache = await idbGetEventCache().catch(() => null);
-  seasonQuickStatsCache = await idbGetEventCache(SEASON_QUICKSTATS_IDB_KEY).catch(() => null);
+  teamEventHistoryCache = await idbGetEventCache(TEAM_EVENT_HISTORY_IDB_KEY).catch(() => null);
   await sweepOrphanImages();
   await preloadAllImages();
   applyRoleUI();
