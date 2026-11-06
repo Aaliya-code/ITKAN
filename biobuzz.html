@@ -366,6 +366,21 @@
   .pick-btn.add { color: var(--green); }
   .pick-btn.rm { color: var(--red); }
   .rp-flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  /* Suggested Pick List rows */
+  .suggested-pick-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .suggested-pick-row:last-child { border-bottom: none; }
+  .suggested-pick-row.marked-taken, .suggested-pick-row.marked-donotpick { opacity: .45; }
+  .spr-main { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .spr-rank { width: 22px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 12px; font-weight: 700; }
+  .spr-team { flex: 1; min-width: 0; }
+  .spr-score { font-size: 16px; font-weight: 700; color: var(--yellow); flex-shrink: 0; }
+  .spr-weight { margin-top: 2px; }
+  .spr-flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .spr-flag { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: var(--surface2); border: 1px solid var(--border); }
+  .spr-flag-disagree { color: var(--yellow); }
+  .spr-flag-redcard { color: var(--red); }
+  .spr-why { margin-top: 2px; }
+  .spr-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .rp-flag { font-size: 10px; font-weight: 700; padding: 4px 9px; border-radius: 12px; background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
   .rp-flag.hit { background: var(--yellow); color: #16181f; border-color: var(--yellow); }
 
@@ -1074,6 +1089,22 @@
 
     <div id="dstep-picker" class="step">
       <div class="hint" style="margin-bottom:12px;">Our team # and alliance size now live in Export &gt; Settings.</div>
+      <div class="card" id="suggestedPickListCard">
+        <div class="card-title">Suggested Pick List</div>
+        <div class="hint" id="suggestedPickListStatus" style="margin-bottom:8px;"></div>
+        <div class="toggle-row" style="margin-bottom:10px;">
+          <div><span class="tname">Fit with us</span><span class="tpoints">boosts teams strong where we're weak</span></div>
+          <div class="switch" id="fitWithUsToggle"></div>
+        </div>
+        <div id="suggestedPickListRows"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;flex-wrap:wrap;gap:8px;">
+          <button type="button" class="btn btn-secondary btn-sm" id="howRankedToggleBtn">How this is ranked ▾</button>
+          <button type="button" class="btn btn-danger btn-sm" id="clearPickMarksBtn">Clear marks</button>
+        </div>
+        <div class="hint" id="howRankedNote" style="display:none;margin-top:8px;">
+          Each team gets a 0-100 Pick Score blending two things: our own scouting (average estimated points mainly, plus auto points, park reliability, tip share, driver/defense ratings, and pit capabilities — broken-down rate and cards count against it, a red card heavily) and FTCScout's cached stats (OPR mainly, then rank/RP and win-loss-tie). The more matches we've scouted for a team, the more its score leans on our own data over FTCScout's; with zero scouted matches it's FTCScout only, and with no FTCScout data at all it's scouting only. "⚠ Data disagree" means our numbers and FTCScout's disagree by a lot — worth a second look either way.
+        </div>
+      </div>
       <div class="card">
         <div class="card-title">Pick List (<span id="pickListMaxLabel">max 1</span>)</div>
         <div id="pickListBox"><div class="empty-state">No teams picked yet. Add teams from the pool below.</div></div>
@@ -5223,7 +5254,12 @@ let schedule = (() => { try { return JSON.parse(localStorage.getItem(LS_SCHEDULE
 // scouter device (Section C). Neither depends on the other: a scouter's
 // Setup QR pulls from whatever schedule/team data the lead's device already
 // has, regardless of where it came from.
-function blankEventData() { return { eventName: '', eventCode: '', season: null, teams: [], teamStats: {}, lastUpdated: null, lastError: null }; }
+// pickMarks: { [normalized team#]: {status: 'taken'|'donotpick', reason} },
+// Suggested Pick List's per-event Taken/Do Not Pick marks. Added here
+// (not a separate localStorage key) so it rides along in saveEventData(),
+// buildFullBackup()/restore, and QR-adjacent event sync for free — every
+// one of those already spreads the whole eventData object wholesale.
+function blankEventData() { return { eventName: '', eventCode: '', season: null, teams: [], teamStats: {}, lastUpdated: null, lastError: null, pickMarks: {} }; }
 let eventData = (() => { try { return { ...blankEventData(), ...JSON.parse(localStorage.getItem(LS_EVENTDATA)) }; } catch(e) { return blankEventData(); } })();
 function saveEventData() { try { localStorage.setItem(LS_EVENTDATA, JSON.stringify(eventData)); } catch(e) {} }
 // Stamps a fresh draft/pitDraft with whichever event this device currently
@@ -6651,7 +6687,324 @@ function removeFromPick(team) {
   renderPicker();
 }
 
+/* ══════════ SUGGESTED PICK LIST (Lead-only, Picker tab) ══════════
+   Root-cause rule: every number here comes from computeTeamStats()/
+   computeEstimate() (scouting) or getOfficialStats()/eventDataAvailability()
+   (FTCScout) — the exact same functions Averages/Rankings/By Team/
+   Compatibility already use. Nothing here recomputes a stat those don't
+   already provide; this only ranks teams by a NEW combination of them. */
+
+// Min-max normalizes a list of raw values to 0-100 (so differently-scaled
+// factors — e.g. raw points vs a percentage vs a 1-5 rating — can be
+// weighted-averaged together meaningfully). Returns a function so callers
+// can map individual values after fitting the range once across a
+// candidate pool. All-equal or empty input -> every real value maps to the
+// neutral midpoint (50) rather than dividing by zero.
+function normalizeToScale(values, invert) {
+  const nums = values.filter(v => v !== null && v !== undefined && !Number.isNaN(v));
+  if (!nums.length) return () => null;
+  const min = Math.min(...nums), max = Math.max(...nums);
+  return (v) => {
+    if (v === null || v === undefined || Number.isNaN(v)) return null;
+    const pct = (max === min) ? 50 : (v - min) / (max - min) * 100;
+    return invert ? 100 - pct : pct;
+  };
+}
+// Weighted average over only the parts that actually have a value — a
+// team with no pit entry, or nobody's rated its driver yet, isn't punished
+// with a 0 for that factor, it just doesn't count toward the average
+// (its weight is redistributed proportionally across whatever IS known).
+function weightedAvgAvailable(parts) {
+  const avail = parts.filter(([v]) => v !== null && v !== undefined && !Number.isNaN(v));
+  if (!avail.length) return null;
+  const totalW = avail.reduce((s, [, w]) => s + w, 0);
+  if (!totalW) return null;
+  return avail.reduce((s, [v, w]) => s + v * w, 0) / totalW;
+}
+function pickListCandidates() {
+  const ourNorm = normTeam(ourTeamNumber);
+  return getEventTeamList().filter(t => t.n !== ourNorm);
+}
+function pickListRawData(team) {
+  const entries = rankableMatches().filter(m => normTeam(m.teamNumber) === team);
+  return { team, stats: computeTeamStats(entries), pit: mergePitEntriesForTeam(team), official: getOfficialStats(team) };
+}
+function pitCapabilityScore(pit) {
+  if (!pit) return null; // no pit entry at all = unknown, excluded from the average rather than counted as 0
+  const caps = [pit.canHive, pit.canFlower, pit.canGarden, pit.canParkLZ];
+  return caps.filter(Boolean).length / caps.length * 100;
+}
+function ratingSubscore(stats) {
+  const vals = [stats.avgRatingDriver, stats.avgRatingDefense].filter(v => v !== null);
+  if (!vals.length) return null;
+  return (vals.reduce((a, b) => a + b, 0) / vals.length) / 5 * 100;
+}
+// The scouting-side composite (0-100, null if this team has never been
+// scouted — see n/(n+3) in the blend below, which makes that value
+// irrelevant anyway when n=0). avgTotal ("average estimated points") is
+// the main factor by weight; auto points, park reliability, tip share,
+// ratings, and pit capabilities fill in the rest. Broke-down rate and
+// cards are subtracted afterward as penalties, a red card weighing much
+// more heavily than yellow.
+function scoutingCompositeRaw(d, normTotal, normAuto, normTip) {
+  if (!d.stats.matches) return null;
+  const parts = [
+    [normTotal(d.stats.avgTotal), 0.35],
+    [normAuto(d.stats.avgAuto), 0.15],
+    [d.stats.parkPct, 0.15],
+    [normTip(d.stats.avgTipShareCount), 0.10],
+    [ratingSubscore(d.stats), 0.15],
+    [pitCapabilityScore(d.pit), 0.10],
+  ];
+  const base = weightedAvgAvailable(parts);
+  if (base === null) return null;
+  const brokenPenalty = (d.stats.brokeDownPct / 100) * 20; // up to -20 for breaking down every match
+  const yellowRate = d.stats.cardCounts.Yellow / d.stats.matches;
+  const redRate = d.stats.cardCounts.Red / d.stats.matches;
+  const cardPenalty = yellowRate * 15 + redRate * 40; // red card weighs much more heavily, per spec
+  return Math.max(0, Math.min(100, base - brokenPenalty - cardPenalty));
+}
+// The FTCScout-side composite (0-100, null if this team has no official
+// stats at all). OPR (totalPointsNp) is the main factor; rank (inverted —
+// rank 1 is best) and RP fill in the rest, then W-L-T.
+function ftcCompositeRaw(d, normOpr, normRank, normRp) {
+  const off = d.official;
+  if (off.opr === null && off.rank === null && off.rp === null && off.wins === null) return null;
+  const winPct = (off.wins !== null && (off.wins + off.losses + off.ties) > 0)
+    ? off.wins / (off.wins + off.losses + off.ties) * 100 : null;
+  const parts = [
+    [normOpr(off.opr), 0.6],
+    [normRank(off.rank), 0.2],
+    [normRp(off.rp), 0.1],
+    [winPct, 0.1],
+  ];
+  return weightedAvgAvailable(parts);
+}
+// Confidence blend: scouting weight = n/(n+3) (0 scouted matches -> pure
+// FTCScout; as n grows, scouting dominates but never fully excludes
+// FTCScout). If the event has no FTCScout stats at all, or this specific
+// team has none, falls back to scouting-only with a note instead of
+// silently treating missing data as a 0.
+function blendPickScore(d, scoutComposite, ftcComposite, hasAnyFtcStats) {
+  const n = d.stats.matches;
+  let scoutW, ftcW, note = '';
+  if (!hasAnyFtcStats) {
+    scoutW = 1; ftcW = 0;
+    note = eventData.lastUpdated
+      ? `No FTCScout data yet — scouting only (event last fetched ${new Date(eventData.lastUpdated).toLocaleString()}).`
+      : 'No FTCScout data yet — scouting only (event never fetched).';
+  } else if (ftcComposite === null) {
+    scoutW = 1; ftcW = 0;
+    note = 'No FTCScout stats for this team — scouting only.';
+  } else if (scoutComposite === null) {
+    scoutW = 0; ftcW = 1;
+  } else {
+    scoutW = n / (n + 3);
+    ftcW = 1 - scoutW;
+  }
+  let score;
+  if (scoutComposite === null && ftcComposite === null) score = null;
+  else if (scoutComposite === null) score = ftcComposite;
+  else if (ftcComposite === null) score = scoutComposite;
+  else score = scoutW * scoutComposite + ftcW * ftcComposite;
+  return { score, scoutW, ftcW, note };
+}
+// "⚠ Data disagree": our scouted average and FTCScout's OPR are both real
+// point-per-match numbers, so a >40%-AND->10pt gap between them is worth
+// flagging regardless of which one is "right." "Low data": fewer than 3
+// scouted matches. "🟥 Red card": ever. Flags never hide a team — they're
+// shown alongside the ranking, not a filter.
+function computePickFlags(d) {
+  const flags = [];
+  if (d.stats.matches > 0 && d.official.opr !== null) {
+    const diff = Math.abs(d.stats.avgTotal - d.official.opr);
+    const pctDiff = diff / Math.max(d.stats.avgTotal, d.official.opr, 1);
+    if (diff > 10 && pctDiff > 0.40) flags.push({ key: 'disagree', label: '⚠ Data disagree' });
+  }
+  if (d.stats.matches < 3) flags.push({ key: 'lowdata', label: 'Low data' });
+  if (d.stats.cardCounts.Red > 0) flags.push({ key: 'redcard', label: '🟥 Red card' });
+  return flags;
+}
+// Top 2-3 human-readable reasons behind a team's rank, picking whichever
+// factors most pushed its composite up (or, for penalties, down) relative
+// to the field. oprRankOf is a {team: rank} map precomputed once across
+// all candidates with real OPR, for the "OPR 48 (#3)" style reason.
+function computePickReasons(d, normTotal, normAuto, oprRankOf) {
+  const reasons = [];
+  if (d.stats.matches > 0) {
+    if (normTotal(d.stats.avgTotal) !== null && normTotal(d.stats.avgTotal) >= 70) reasons.push({ w: normTotal(d.stats.avgTotal), text: 'High est. points' });
+    if (normAuto(d.stats.avgAuto) !== null && normAuto(d.stats.avgAuto) >= 70) reasons.push({ w: normAuto(d.stats.avgAuto) - 5, text: 'Strong auto' });
+    if (d.stats.parkPct >= 75) reasons.push({ w: d.stats.parkPct - 10, text: 'Reliable park' });
+    if (d.stats.avgRatingDriver !== null && d.stats.avgRatingDriver >= 4) reasons.push({ w: d.stats.avgRatingDriver * 20 - 15, text: 'Strong driver' });
+    if (d.stats.brokeDownPct >= 25) reasons.push({ w: 200, text: `Breaks down ${Math.round(d.stats.brokeDownPct)}% of matches` });
+    if (d.stats.cardCounts.Red > 0) reasons.push({ w: 300, text: 'Has drawn a red card' });
+  }
+  if (d.official.opr !== null && oprRankOf[d.team]) {
+    reasons.push({ w: 60, text: `OPR ${d.official.opr.toFixed(0)} (#${oprRankOf[d.team]})` });
+  }
+  if (d.stats.matches === 0) reasons.push({ w: -100, text: 'Not scouted yet' });
+  reasons.sort((a, b) => b.w - a.w);
+  return reasons.slice(0, 3).map(r => r.text);
+}
+// "Fit with us" (off by default): boosts candidates who are strong in a
+// dimension where OUR team is comparatively weak. No fit-SCORE exists in
+// the Compatibility tab to call directly (it only does side-by-side stats
+// + geometric start/path conflict detection) — this reuses the same
+// computeTeamStats() numbers Compat already displays, just as a new
+// comparison, per the task's "reusing the Compatibility tab's logic"
+// meaning its STATS, not a score that doesn't exist yet.
+function computeFitBoost(ourStats, theirStats) {
+  if (!ourStats || !ourStats.matches) return 0; // nothing of ours to compare against
+  const dims = [
+    [ourStats.avgAuto, theirStats.avgAuto],
+    [ourStats.avgTeleop, theirStats.avgTeleop],
+    [ourStats.avgEndgame, theirStats.avgEndgame],
+    [ourStats.parkPct, theirStats.parkPct],
+  ];
+  let boost = 0;
+  dims.forEach(([ourV, theirV]) => {
+    if (theirV > ourV) {
+      const gapRatio = ourV > 0 ? Math.min((theirV - ourV) / ourV, 1) : (theirV > 0 ? 1 : 0);
+      boost += gapRatio * 5; // each dimension contributes up to +5
+    }
+  });
+  return Math.min(boost, 20); // total boost capped at +20
+}
+let fitWithUs = false;
+const LS_PICK_MARK_SORT = { taken: 1, donotpick: 1, '': 0 }; // marked teams sort after unmarked, regardless of score
+function computeSuggestedPickList() {
+  const candidates = pickListCandidates();
+  const allData = candidates.map(t => pickListRawData(t.n));
+  const scoutedData = allData.filter(d => d.stats.matches > 0);
+  const normTotal = normalizeToScale(scoutedData.map(d => d.stats.avgTotal));
+  const normAuto = normalizeToScale(scoutedData.map(d => d.stats.avgAuto));
+  const normTip = normalizeToScale(scoutedData.map(d => d.stats.avgTipShareCount));
+
+  const ftcData = allData.filter(d => d.official.opr !== null || d.official.rank !== null || d.official.rp !== null || d.official.wins !== null);
+  const normOpr = normalizeToScale(ftcData.map(d => d.official.opr));
+  const normRank = normalizeToScale(ftcData.map(d => d.official.rank), true); // inverted: rank 1 -> 100
+  const normRp = normalizeToScale(ftcData.map(d => d.official.rp));
+  const hasAnyFtcStats = ftcData.length > 0;
+
+  const oprRanked = ftcData.filter(d => d.official.opr !== null).sort((a, b) => b.official.opr - a.official.opr);
+  const oprRankOf = {};
+  oprRanked.forEach((d, i) => { oprRankOf[d.team] = i + 1; });
+
+  const ourEntries = rankableMatches().filter(m => normTeam(m.teamNumber) === normTeam(ourTeamNumber));
+  const ourStats = computeTeamStats(ourEntries);
+
+  const marks = (eventData.pickMarks || {});
+  const results = allData.map(d => {
+    const scoutComposite = scoutingCompositeRaw(d, normTotal, normAuto, normTip);
+    const ftcComposite = ftcCompositeRaw(d, normOpr, normRank, normRp);
+    const blend = blendPickScore(d, scoutComposite, ftcComposite, hasAnyFtcStats);
+    let score = blend.score;
+    if (fitWithUs && score !== null) score = Math.min(100, score + computeFitBoost(ourStats, d.stats));
+    const mark = marks[d.team] || null;
+    return {
+      team: d.team, name: teamNameFor(d.team), score,
+      scoutW: blend.scoutW, ftcW: blend.ftcW, note: blend.note,
+      flags: computePickFlags(d), reasons: computePickReasons(d, normTotal, normAuto, oprRankOf),
+      mark, matches: d.stats.matches, avgTotal: d.stats.avgTotal, opr: d.official.opr,
+    };
+  });
+  results.sort((a, b) => {
+    const markOrder = (LS_PICK_MARK_SORT[a.mark ? a.mark.status : ''] || 0) - (LS_PICK_MARK_SORT[b.mark ? b.mark.status : ''] || 0);
+    if (markOrder !== 0) return markOrder;
+    const as = a.score === null ? -1 : a.score, bs = b.score === null ? -1 : b.score;
+    return bs - as;
+  });
+  return results;
+}
+function setPickMark(team, status, reason) {
+  if (!eventData.pickMarks) eventData.pickMarks = {};
+  if (!status) delete eventData.pickMarks[team];
+  else eventData.pickMarks[team] = { status, reason: reason || '' };
+  saveEventData();
+}
+function renderSuggestedPickList() {
+  const card = document.getElementById('suggestedPickListCard');
+  if (!card) return;
+  if (!ourTeamNumber) {
+    document.getElementById('suggestedPickListStatus').textContent = 'Set our team # in Export > Settings to see suggested picks.';
+    document.getElementById('suggestedPickListRows').innerHTML = '';
+    return;
+  }
+  // Deliberately NOT gated on eventData.eventCode — getEventTeamList() (via
+  // pickListCandidates()) already falls back to the imported CSV schedule
+  // when no FTCScout event is selected, same as Rankings/Averages/Picker's
+  // existing pool do. Gating here too would hide every team for a device
+  // that only ever imported a schedule and never picked an FTCScout event.
+  const rows = computeSuggestedPickList();
+  const rowsEl = document.getElementById('suggestedPickListRows');
+  if (!rows.length) {
+    document.getElementById('suggestedPickListStatus').textContent = 'No other teams yet — pick an event in Export > FTCScout, or import a CSV schedule, to see suggested picks.';
+    rowsEl.innerHTML = '';
+    return;
+  }
+  const notes = [...new Set(rows.map(r => r.note).filter(Boolean))];
+  document.getElementById('suggestedPickListStatus').textContent = notes[0] || `Ranked ${rows.length} team${rows.length === 1 ? '' : 's'} at this event.`;
+  const max = allianceSize - 1;
+  rowsEl.innerHTML = rows.map((r, i) => {
+    const marked = r.mark && r.mark.status;
+    const weightPct = r.score === null ? null : Math.round(r.scoutW * 100);
+    return `
+    <div class="suggested-pick-row${marked ? ' marked-' + marked : ''}" data-suggested-team="${esc(r.team)}">
+      <div class="spr-main" data-suggested-open="${esc(r.team)}">
+        <span class="spr-rank">${i + 1}</span>
+        <span class="spr-team">${teamCellHtml(r.team, r.name)}</span>
+        <span class="spr-score">${r.score === null ? '—' : r.score.toFixed(0)}</span>
+      </div>
+      ${weightPct !== null ? `<div class="spr-weight hint">Scout ${weightPct}% · FTCScout ${100 - weightPct}%</div>` : ''}
+      ${r.flags.length ? `<div class="spr-flags">${r.flags.map(f => `<span class="spr-flag spr-flag-${f.key}">${esc(f.label)}</span>`).join('')}</div>` : ''}
+      ${r.reasons.length ? `<div class="hint spr-why">${r.reasons.map(esc).join(' · ')}</div>` : ''}
+      ${marked === 'donotpick' && r.mark.reason ? `<div class="hint spr-why">Do Not Pick: ${esc(r.mark.reason)}</div>` : ''}
+      <div class="spr-actions">
+        <button class="pick-btn add" data-suggested-add="${esc(r.team)}" ${pickList.includes(r.team) || pickList.length >= max ? 'disabled style="opacity:.3"' : ''}>+</button>
+        <button class="btn btn-secondary btn-sm" data-suggested-taken="${esc(r.team)}">${marked === 'taken' ? 'Un-mark' : 'Taken'}</button>
+        <button class="btn btn-secondary btn-sm" data-suggested-dnp="${esc(r.team)}">${marked === 'donotpick' ? 'Un-mark' : 'Do Not Pick'}</button>
+      </div>
+    </div>`;
+  }).join('');
+  rowsEl.querySelectorAll('[data-suggested-open]').forEach(el => el.addEventListener('click', () => openByTeamFromRankings(el.dataset.suggestedOpen)));
+  rowsEl.querySelectorAll('[data-suggested-add]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); addToPick(el.dataset.suggestedAdd); }));
+  rowsEl.querySelectorAll('[data-suggested-taken]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const team = el.dataset.suggestedTaken;
+    const current = (eventData.pickMarks || {})[team];
+    setPickMark(team, current && current.status === 'taken' ? null : 'taken');
+    renderSuggestedPickList();
+  }));
+  rowsEl.querySelectorAll('[data-suggested-dnp]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const team = el.dataset.suggestedDnp;
+    const current = (eventData.pickMarks || {})[team];
+    if (current && current.status === 'donotpick') { setPickMark(team, null); }
+    else { const reason = prompt('Optional reason (or leave blank):', (current && current.reason) || '') || ''; setPickMark(team, 'donotpick', reason); }
+    renderSuggestedPickList();
+  }));
+}
+document.getElementById('fitWithUsToggle').classList.toggle('on', fitWithUs);
+document.getElementById('fitWithUsToggle').addEventListener('click', (e) => {
+  fitWithUs = !fitWithUs;
+  e.currentTarget.classList.toggle('on', fitWithUs);
+  renderSuggestedPickList();
+});
+document.getElementById('howRankedToggleBtn').addEventListener('click', () => {
+  const note = document.getElementById('howRankedNote');
+  const open = note.style.display !== 'none';
+  note.style.display = open ? 'none' : 'block';
+  document.getElementById('howRankedToggleBtn').textContent = open ? 'How this is ranked ▾' : 'How this is ranked ▴';
+});
+document.getElementById('clearPickMarksBtn').addEventListener('click', () => {
+  if (!confirm('Clear all Taken / Do Not Pick marks for this event?')) return;
+  eventData.pickMarks = {};
+  saveEventData();
+  renderSuggestedPickList();
+});
+
 function renderPicker() {
+  renderSuggestedPickList(); // updates live whenever Picker re-renders — same renderData() call graph as everything else (QR receive, FTCScout refresh)
   const rows = teamAverages();
   const sortMap = { est: 'avgTotal', tips: 'avgTipShareCount', leave: 'leavePct', park: 'parkPct' };
   const key = sortMap[pickerSortKey];
@@ -9330,6 +9683,110 @@ async function runSelfTests() {
       record('By Team / Compat: routineRowsHtml + drawRoutineDisplayCanvases render the routine\'s actual field drawing, not just text', hasCanvasPlaceholder && strokeDrawn,
         { hasCanvasPlaceholder, strokeDrawn });
     } catch (err) { record('By Team / Compat: routineRowsHtml + drawRoutineDisplayCanvases render the routine\'s actual field drawing, not just text', false, err.message); }
+
+    // Suggested Pick List: the blend's confidence weighting, flags, and
+    // Taken-sorting — each test sets up its own minimal fixture (our team
+    // #1, one candidate team #50) and restores real state in a finally.
+    {
+      const pickFixtureSaved = { matches, eventData: JSON.parse(JSON.stringify(eventData)), ourTeamNumber, allianceSize, viewEventFilter, fitWithUs };
+      function pickFixture({ n = 0, teamStats = null, overrides = {} } = {}) {
+        ourTeamNumber = '1';
+        viewEventFilter = 'all';
+        fitWithUs = false;
+        eventData = { ...blankEventData(), eventCode: 'CT_PICK1', season: 2026, lastUpdated: new Date().toISOString(),
+          teams: [{ number: '1', name: 'Us' }, { number: '50', name: 'Candidate' }],
+          teamStats: teamStats === null ? { '50': { rank: 3, rp: 5, opr: 30, wins: 2, losses: 2, ties: 0 } } : teamStats };
+        const ts = Date.now();
+        matches = [];
+        for (let i = 1; i <= n; i++) {
+          matches.push({
+            id: `ct_pick50_${i}`, matchType: 'Qualification', matchNumber: String(i), teamNumber: '50', alliance: 'red',
+            eventCode: 'CT_PICK1', season: 2026, scouter: 'T', leave: true, autoPark: true, teleopPark: true,
+            autoHiveMade: 2, teleopHiveMade: 2, teleopFlowerMade: 2, ownGarden: 1,
+            autoTips: 1, teleopTips: 1, card: '', defense: false, brokeDown: false,
+            ratingDriver: 4, ratingDefense: '', notes: '', updatedAt: ts, ts, sent: false, schemaVersion: 7,
+            ...overrides,
+          });
+        }
+      }
+      function pickFixtureRestore() {
+        matches = pickFixtureSaved.matches; eventData = pickFixtureSaved.eventData; ourTeamNumber = pickFixtureSaved.ourTeamNumber;
+        allianceSize = pickFixtureSaved.allianceSize; viewEventFilter = pickFixtureSaved.viewEventFilter; fitWithUs = pickFixtureSaved.fitWithUs;
+      }
+
+      try {
+        pickFixture({ n: 0 });
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = !!row && row.scoutW === 0 && row.ftcW === 1 && row.score !== null;
+        record('Pick Score: 0 scouted matches blends FTCScout only (scoutW=0, ftcW=1)', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: 0 scouted matches blends FTCScout only (scoutW=0, ftcW=1)', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        pickFixture({ n: 10 });
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const expectedScoutW = 10 / 13;
+        const pass = !!row && Math.abs(row.scoutW - expectedScoutW) < 0.001 && row.scoutW > 0.75;
+        record('Pick Score: 10 scouted matches blends mostly scouting (scoutW=10/13 ≈ 0.77)', pass, JSON.stringify({ scoutW: row && row.scoutW, expectedScoutW }));
+      } catch (err) { record('Pick Score: 10 scouted matches blends mostly scouting (scoutW=10/13 ≈ 0.77)', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        pickFixture({ n: 5, teamStats: {} }); // event has NO FTCScout stats for ANY team
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = !!row && row.scoutW === 1 && row.ftcW === 0 && /No FTCScout data/.test(row.note) && row.score !== null;
+        record('Pick Score: no FTCScout data at all for the event blends scouting only, with a note', pass, JSON.stringify(row));
+      } catch (err) { record('Pick Score: no FTCScout data at all for the event blends scouting only, with a note', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // The fixture's scouted matches (shared helper above) score well
+        // over 50 pts/match via real computeEstimate math; a deliberately
+        // tiny OPR of 10 is far enough off to clear both the >10pt and
+        // >40% thresholds regardless of the exact scouted figure.
+        pickFixture({ n: 3, teamStats: { '50': { rank: 3, rp: 5, opr: 10, wins: 2, losses: 2, ties: 0 } } });
+        const row = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = !!row && row.flags.some(f => f.key === 'disagree');
+        record('Pick Score: "Data disagree" flag fires when scouted avg and OPR differ by >40% and >10 points', pass, JSON.stringify({ avgTotal: row && row.avgTotal, opr: row && row.opr, flags: row && row.flags }));
+      } catch (err) { record('Pick Score: "Data disagree" flag fires when scouted avg and OPR differ by >40% and >10 points', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        pickFixture({ n: 3 }); // no card
+        const scoreWithoutCard = computeSuggestedPickList().find(r => r.team === '50').score;
+        pickFixtureRestore();
+        pickFixture({ n: 3, overrides: { card: 'Red' } }); // every match carries a red card
+        const rowWithCard = computeSuggestedPickList().find(r => r.team === '50');
+        const pass = rowWithCard.flags.some(f => f.key === 'redcard') && rowWithCard.score < scoreWithoutCard;
+        record('Pick Score: a red card is flagged and lowers the score vs. an identical team with none', pass,
+          JSON.stringify({ scoreWithoutCard, scoreWithCard: rowWithCard.score, flags: rowWithCard.flags }));
+      } catch (err) { record('Pick Score: a red card is flagged and lowers the score vs. an identical team with none', false, err.message); }
+      finally { pickFixtureRestore(); }
+
+      try {
+        // Two candidates: #50 genuinely scores higher than #51, but #50 is
+        // marked Taken — it must still sort after the unmarked #51 despite
+        // the higher raw score (never hidden, just moved down).
+        ourTeamNumber = '1'; viewEventFilter = 'all'; fitWithUs = false;
+        const ts = Date.now();
+        eventData = { ...blankEventData(), eventCode: 'CT_PICK1', season: 2026, lastUpdated: new Date().toISOString(),
+          teams: [{ number: '1', name: 'Us' }, { number: '50', name: 'Better' }, { number: '51', name: 'Worse' }],
+          teamStats: { '50': { rank: 1, rp: 10, opr: 50, wins: 5, losses: 0, ties: 0 }, '51': { rank: 5, rp: 3, opr: 15, wins: 1, losses: 4, ties: 0 } },
+          pickMarks: {} };
+        matches = [{ id: 'ct_pick50', matchType: 'Qualification', matchNumber: '1', teamNumber: '50', alliance: 'red', eventCode: 'CT_PICK1', season: 2026, leave: true, autoPark: true, teleopPark: true, autoHiveMade: 3, teleopHiveMade: 3, teleopFlowerMade: 3, ownGarden: 1, autoTips: 2, teleopTips: 2, card: '', defense: false, brokeDown: false, ratingDriver: 5, ratingDefense: '', notes: '', updatedAt: ts, ts, sent: false, schemaVersion: 7 }];
+        const before = computeSuggestedPickList();
+        const beforeOrder = before.map(r => r.team);
+        const scoreGapReal = before.find(r => r.team === '50').score > before.find(r => r.team === '51').score;
+        setPickMark('50', 'taken');
+        const after = computeSuggestedPickList();
+        const afterOrder = after.map(r => r.team);
+        const pass = scoreGapReal && beforeOrder[0] === '50' && afterOrder[afterOrder.length - 1] === '50' && afterOrder.includes('50'); // still listed, just last
+        record('Pick Score: marking a team Taken sorts it to the bottom without hiding it, even if it outscores unmarked teams', pass,
+          JSON.stringify({ beforeOrder, afterOrder, scoreGapReal }));
+        eventData.pickMarks = {};
+      } catch (err) { record('Pick Score: marking a team Taken sorts it to the bottom without hiding it, even if it outscores unmarked teams', false, err.message); }
+      finally { pickFixtureRestore(); }
+    }
 
     // Scouter self-reset (Me sheet link): routes to the blocked screen
     // with unsent entries, the confirm screen (with the self-reset's own
