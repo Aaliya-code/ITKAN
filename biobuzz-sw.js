@@ -1,4 +1,4 @@
-const CACHE = 'biobuzz2026-v51';
+const CACHE = 'biobuzz2026-v52';
 // No './' here: there's no index.html at the site root, only biobuzz.html
 // directly. GitHub Pages 404s a directory with no index, which fails this
 // whole addAll() and leaves the worker stuck "redundant" — Python's dev
@@ -36,6 +36,14 @@ self.addEventListener('fetch', e => {
   // and simpler than enumerating identitytoolkit/securetoken/firestore/
   // firebaseinstallations individually.
   if (new URL(e.request.url).hostname.endsWith('.googleapis.com')) return;
+  // The sign-up notifier (Apps Script web app) — a POST is already
+  // excluded above, but Apps Script serves its response via a redirect
+  // through script.googleusercontent.com, which this cache-then-network
+  // handler would otherwise still try to intercept/cache on that hop.
+  {
+    const h = new URL(e.request.url).hostname;
+    if (h === 'script.google.com' || h.endsWith('.googleusercontent.com')) return;
+  }
   e.respondWith(
     caches.match(e.request).then(cached => {
       const network = fetch(e.request).then(res => {

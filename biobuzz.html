@@ -686,6 +686,8 @@
   .pw-row { display: flex; gap: 6px; }
   .pw-row input { flex: 1; }
   .pw-toggle { flex-shrink: 0; white-space: nowrap; }
+  @keyframes scouterRowHighlightFade { from { background: rgba(74,144,226,.35); } to { background: transparent; } }
+  .scouter-row-highlight { animation: scouterRowHighlightFade 3s ease-out; border-color: var(--blue) !important; }
 </style>
 <script>
   window.__fbReadyPromise = new Promise(resolve => { window.__fbReadyResolve = resolve; });
@@ -5487,6 +5489,112 @@ function rosterCacheUpsert(data) {
   saveRosterCache();
 }
 
+// ══════════ Sign-up email notifier (Apps Script, separate from Firebase
+// — the free Spark plan can't send email at all) ══════════
+// Fill in once deployed: Apps Script > Deploy > Web app > the URL it
+// gives you. Fire-and-forget by design — a signup must NEVER fail or
+// wait on this; a failed/offline send just queues for the next retry,
+// which happens on 'online' and on the same periodic timer that already
+// silently refreshes FTCScout data.
+let SIGNUP_NOTIFIER_URL = 'REPLACE_ME'; // let, not const — ?test=1 temporarily overrides this to exercise the real send/retry path without a real network call
+const LS_PENDING_NOTIFICATIONS = 'biobuzz2026_pendingNotifications';
+function loadPendingNotifications() {
+  try { const v = JSON.parse(localStorage.getItem(LS_PENDING_NOTIFICATIONS)); if (Array.isArray(v)) return v; } catch (e) {}
+  return [];
+}
+let pendingNotifications = loadPendingNotifications();
+function savePendingNotifications() { try { localStorage.setItem(LS_PENDING_NOTIFICATIONS, JSON.stringify(pendingNotifications)); } catch (e) {} }
+async function sendOneNotification(item) {
+  if (SIGNUP_NOTIFIER_URL === 'REPLACE_ME') return false;
+  try {
+    // No explicit Content-Type header — a POST with a plain string body
+    // defaults to text/plain, which is a CORS "simple request" and skips
+    // the preflight OPTIONS call Apps Script web apps don't handle.
+    const res = await fetch(SIGNUP_NOTIFIER_URL, { method: 'POST', body: JSON.stringify(item) });
+    return res.ok;
+  } catch (err) { return false; }
+}
+// Called once, right after a signup batch actually commits — queues
+// first, THEN tries to send immediately, so a device that's online right
+// now still gets the "retry later if it fails" safety net for free
+// instead of a separate code path.
+function notifyLeadOfSignup(name, username, scouterId) {
+  if (SIGNUP_NOTIFIER_URL === 'REPLACE_ME') return; // not deployed yet — nothing to queue
+  pendingNotifications.push({ name, username, scouterId });
+  savePendingNotifications();
+  retryPendingNotifications();
+}
+let _notificationsRetrying = false;
+async function retryPendingNotifications() {
+  if (_notificationsRetrying || !pendingNotifications.length) return;
+  _notificationsRetrying = true;
+  try {
+    // Oldest-first, stop at the first failure (still-offline, or the
+    // mailer itself down) rather than burning through the whole queue
+    // out of order if connectivity drops mid-retry.
+    while (pendingNotifications.length) {
+      const ok = await sendOneNotification(pendingNotifications[0]);
+      if (!ok) break;
+      pendingNotifications.shift();
+      savePendingNotifications();
+    }
+  } finally { _notificationsRetrying = false; }
+}
+window.addEventListener('online', retryPendingNotifications);
+
+// ══════════ #review=<scouterId> deep link (from the sign-up notification email) ══════════
+// Approving/denying still only ever happens through the lead's own
+// signed-in Firebase account and the existing Firestore rules — this
+// link is purely navigation, never a bypass. If the device isn't signed
+// in as an active lead yet, the target scouterId is remembered
+// (pendingReviewScouterId) and picked back up automatically the moment
+// beginAccountSession() completes for a lead account.
+let pendingReviewScouterId = null;
+function parseReviewHash() {
+  const m = location.hash.match(/^#review=(.+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function isSignedInAsLead() { return deviceRole === 'lead' && !!accountSession && accountSession.role === 'lead'; }
+async function handleReviewDeepLink() {
+  const scouterId = pendingReviewScouterId || parseReviewHash();
+  if (!scouterId) return;
+  if (!isSignedInAsLead()) {
+    pendingReviewScouterId = scouterId;
+    if (deviceRole !== 'lead') {
+      showToast('Enter the Lead PIN to review this sign-up.', true);
+      openRoleGate();
+    } else {
+      showToast('Sign in to your lead account (Export page) to review this sign-up.', true);
+      document.querySelector('nav button[data-page="export"]').click();
+    }
+    return;
+  }
+  pendingReviewScouterId = null;
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {} // don't re-trigger on reload
+  document.querySelector('nav button[data-page="export"]').click();
+  await new Promise(r => setTimeout(r, 100));
+  document.getElementById('openScoutersBtn').click();
+  await highlightScouterRowWhenReady(scouterId);
+}
+// The Scouters screen renders from whatever the live listener has
+// cached so far (_latestScouters) — a device that JUST signed in as
+// lead may not have its first snapshot yet, so this polls briefly
+// instead of assuming the row is there on the first render.
+async function highlightScouterRowWhenReady(scouterId, attemptsLeft) {
+  if (attemptsLeft === undefined) attemptsLeft = 6;
+  const row = document.querySelector(`[data-scouter-row="${CSS.escape(scouterId)}"]`);
+  if (row) {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.add('scouter-row-highlight');
+    setTimeout(() => row.classList.remove('scouter-row-highlight'), 3000);
+    return;
+  }
+  if (attemptsLeft <= 0) { showToast('That sign-up was not found — it may already be handled.', true); return; }
+  await new Promise(r => setTimeout(r, 400));
+  await highlightScouterRowWhenReady(scouterId, attemptsLeft - 1);
+}
+window.addEventListener('hashchange', () => { if (parseReviewHash()) handleReviewDeepLink(); });
+
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 function normUsername(u) { return (u || '').trim().toLowerCase(); }
 
@@ -5507,6 +5615,9 @@ function beginAccountSession({ scouterId, uid, sessionId, name, username, role, 
   applyScouterNameLockUI();
   renderLeadAccountCard();
   startSessionWatcher();
+  // A #review= deep link that arrived before this device was signed in
+  // as a lead picks back up the instant it is — see handleReviewDeepLink().
+  if (role === 'lead' && pendingReviewScouterId) handleReviewDeepLink();
 }
 async function endAccountSession() {
   stopSessionWatcher();
@@ -5567,6 +5678,7 @@ async function signUpAccount(nameRaw, usernameRaw, password) {
   }
   pendingSignup = { scouterId, uid, name, username };
   savePendingSignup();
+  notifyLeadOfSignup(name, username, scouterId); // fire-and-forget — never blocks or fails the signup itself
   return { ok: true };
 }
 // Called whenever the lead's roster snapshot updates AND we have a
@@ -7005,7 +7117,7 @@ function scouterRowHtml(a) {
     }
   }
   return `
-    <div class="review-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+    <div class="review-row" data-scouter-row="${esc(a.id)}" style="flex-direction:column;align-items:stretch;gap:6px;">
       <div style="display:flex;justify-content:space-between;gap:8px;"><b>${esc(a.name || '(unnamed)')}${a.isOwner ? ' 👑' : a.role === 'lead' ? ' (lead)' : ''}</b><span class="hint">@${esc(a.username || '')}</span></div>
       <div class="hint">${count} ${count === 1 ? 'entry' : 'entries'} · last sync ${lastSync ? new Date(lastSync).toLocaleString() : 'never'}</div>
       <div class="btn-row">${actions.join('')}</div>
@@ -11272,6 +11384,116 @@ async function runSelfTests() {
       finally { acctRestore(); }
     }
 
+    // Sign-up notifier (Apps Script mailer): mocked fetch, never a real
+    // network call — called once per successful signup with the right
+    // payload, never for a failed signup, and a failed/offline send
+    // queues for retry rather than being silently dropped.
+    {
+      const notifierSaved = { url: SIGNUP_NOTIFIER_URL, pending: JSON.parse(JSON.stringify(pendingNotifications)), fetch: window.fetch };
+      function notifierRestore() {
+        SIGNUP_NOTIFIER_URL = notifierSaved.url;
+        pendingNotifications = notifierSaved.pending;
+        savePendingNotifications();
+        window.fetch = notifierSaved.fetch;
+      }
+
+      try {
+        SIGNUP_NOTIFIER_URL = 'https://mock.test/notify';
+        pendingNotifications = [];
+        const calls = [];
+        window.fetch = async (url, opts) => { calls.push({ url, body: JSON.parse(opts.body) }); return { ok: true }; };
+        notifyLeadOfSignup('Test Kid', 'testkid', 'sc_test123');
+        await new Promise(r => setTimeout(r, 50)); // let the fire-and-forget promise chain settle
+        const pass = calls.length === 1 && calls[0].url === 'https://mock.test/notify'
+          && calls[0].body.name === 'Test Kid' && calls[0].body.username === 'testkid' && calls[0].body.scouterId === 'sc_test123'
+          && pendingNotifications.length === 0; // sent successfully -> drained from the queue
+        record('Notifier: a successful signup sends exactly one notification with the right payload', pass, { calls, pendingNotifications });
+      } catch (err) { record('Notifier: a successful signup sends exactly one notification with the right payload', false, err.message); }
+      finally { notifierRestore(); }
+
+      try {
+        SIGNUP_NOTIFIER_URL = 'https://mock.test/notify';
+        let fetchCalled = false;
+        window.fetch = async () => { fetchCalled = true; return { ok: true }; };
+        const result = await signUpAccount('', 'validusername', 'password123'); // fails validation before ever touching Firebase
+        const pass = !result.ok && !fetchCalled;
+        record('Notifier: a FAILED signup never sends a notification', pass, { result, fetchCalled });
+      } catch (err) { record('Notifier: a FAILED signup never sends a notification', false, err.message); }
+      finally { notifierRestore(); }
+
+      try {
+        SIGNUP_NOTIFIER_URL = 'https://mock.test/notify';
+        pendingNotifications = [];
+        window.fetch = async () => { throw new Error('offline'); };
+        notifyLeadOfSignup('Offline Kid', 'offlinekid', 'sc_offline1');
+        await new Promise(r => setTimeout(r, 50));
+        const queuedAfterFailure = pendingNotifications.length === 1 && pendingNotifications[0].scouterId === 'sc_offline1';
+        const calls = [];
+        window.fetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return { ok: true }; };
+        await retryPendingNotifications();
+        const pass = queuedAfterFailure && pendingNotifications.length === 0 && calls.length === 1 && calls[0].scouterId === 'sc_offline1';
+        record('Notifier: a failed/offline send is queued, then successfully retried once back online', pass, { queuedAfterFailure, calls, pendingAfterRetry: pendingNotifications.length });
+      } catch (err) { record('Notifier: a failed/offline send is queued, then successfully retried once back online', false, err.message); }
+      finally { notifierRestore(); }
+    }
+
+    // #review=<scouterId> deep link: signed in as an active lead jumps
+    // straight to a highlighted Scouters row; not signed in remembers
+    // the target instead of navigating anywhere; an unknown/already-
+    // handled id surfaces a clear message instead of hanging forever.
+    {
+      const reviewSaved = { hash: location.hash, pendingReview: pendingReviewScouterId, accountSession: accountSession ? { ...accountSession } : null, deviceRole };
+      function reviewRestore() {
+        try { history.replaceState(null, '', location.pathname + location.search + reviewSaved.hash); } catch (e) {}
+        pendingReviewScouterId = reviewSaved.pendingReview;
+        accountSession = reviewSaved.accountSession;
+        deviceRole = reviewSaved.deviceRole;
+      }
+
+      try {
+        accountSession = null;
+        deviceRole = 'scouter';
+        pendingReviewScouterId = null;
+        try { history.replaceState(null, '', location.pathname + location.search + '#review=sc_notsignedin'); } catch (e) {}
+        await handleReviewDeepLink();
+        const pass = pendingReviewScouterId === 'sc_notsignedin';
+        record('Review deep link: not signed in as a lead remembers the target instead of navigating', pass, { pendingReviewScouterId });
+      } catch (err) { record('Review deep link: not signed in as a lead remembers the target instead of navigating', false, err.message); }
+      finally { reviewRestore(); }
+
+      try {
+        // Inject into _latestScouters (the ACTUAL data source
+        // renderScoutersScreen() reads from) rather than hand-building a
+        // DOM node directly — #openScoutersBtn's real click handler
+        // rewrites #scoutersPendingList's innerHTML wholesale, which
+        // would just destroy a manually-appended fake row before this
+        // ever got a chance to find it.
+        const latestScoutersSaved = _latestScouters.slice();
+        deviceRole = 'lead';
+        accountSession = { scouterId: 'sc_selftest_lead', uid: 'u1', sessionId: 's1', name: 'Self Test Lead', username: 'selftestlead', role: 'lead', isOwner: true };
+        pendingReviewScouterId = null;
+        _latestScouters = [{ id: 'sc_review_target', name: 'Review Target', username: 'reviewtarget', status: 'pending', role: 'scouter', isOwner: false }];
+        try { history.replaceState(null, '', location.pathname + location.search + '#review=sc_review_target'); } catch (e) {}
+        await handleReviewDeepLink();
+        const row = document.querySelector('[data-scouter-row="sc_review_target"]');
+        const pass = !!row && row.classList.contains('scouter-row-highlight');
+        record('Review deep link: signed in as lead highlights the matching row', pass, { found: !!row, classList: row && row.className });
+        _latestScouters = latestScoutersSaved;
+      } catch (err) { record('Review deep link: signed in as lead highlights the matching row', false, err.message); }
+      finally { reviewRestore(); }
+
+      try {
+        const savedToast = window.showToast;
+        let toastMsg = '';
+        window.showToast = (msg) => { toastMsg = msg; };
+        await highlightScouterRowWhenReady('sc_this_id_does_not_exist_anywhere', 0);
+        window.showToast = savedToast;
+        const pass = toastMsg.toLowerCase().includes('not found');
+        record('Review deep link: an unknown/already-handled id shows a clear message, not a silent hang', pass, { toastMsg });
+      } catch (err) { record('Review deep link: an unknown/already-handled id shows a clear message, not a silent hang', false, err.message); }
+      finally { reviewRestore(); }
+    }
+
     // Scouter self-reset (Me sheet link): routes to the blocked screen
     // with unsent entries, the confirm screen (with the self-reset's own
     // itemized message, not the Reset QR's "lead wants to..." one) with
@@ -11456,6 +11678,11 @@ async function runSelfTests() {
   renderEventDataUI();
   maybeShowAddToHomeScreenTip();
   const isTestRun = new URLSearchParams(location.search).get('test') === '1';
+  if (!isTestRun) {
+    retryPendingNotifications();
+    setInterval(retryPendingNotifications, 5 * 60 * 1000);
+    handleReviewDeepLink();
+  }
   if (!isTestRun && eventData.eventCode) {
     fetchEventData(true); // silent: refresh whatever's cached without blocking the UI
     setInterval(() => { if (eventData.eventCode) fetchEventData(true); }, 5 * 60 * 1000);
