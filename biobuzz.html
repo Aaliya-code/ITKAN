@@ -796,22 +796,27 @@
       }, () => {});
     },
     async leadUpdateScouter(scouterId, fields) { await updateDoc(doc(db, 'scouters', scouterId), fields); },
-    // merge: true on both of these — a doc here can be independently
-    // created by whichever side (student or lead) acts first, and a plain
-    // setDoc() would otherwise silently wipe out whatever the OTHER side
-    // had already written (see firestore.rules' comment on this match).
+    // merge: true — this doc can be independently created by whichever
+    // side (student or lead) acts first, and a plain setDoc() would
+    // otherwise silently wipe out whatever the OTHER side had already
+    // written. Students are the ONLY writer now (requestedAt only) — a
+    // lead never writes here at all (see leadAllowPasswordReset below).
     async requestReset(unameLower) { await setDoc(doc(db, 'resetRequests', unameLower), { requestedAt: new Date().toISOString() }, { merge: true }); },
-    async setResetAllowed(unameLower, allowed) { await setDoc(doc(db, 'resetRequests', unameLower), { allowed }, { merge: true }); },
     // 30 minutes out, as a real Firestore Timestamp (not an ISO string —
-    // the rules compare it directly against request.time). A reset
-    // window this short-lived, single-use, and consumed atomically on
-    // completion is what makes "ANY signed-in user can re-point
-    // usernames/<u> while resetAllowed==true" a non-issue: there's only
-    // ever one live window, for 30 minutes, and completing it burns it.
+    // the rules compare it directly against request.time).
     resetExpiryTimestamp() { return Timestamp.fromMillis(Date.now() + 30 * 60 * 1000); },
-    async getResetRequest(unameLower) {
-      const snap = await getDoc(doc(db, 'resetRequests', unameLower));
-      return snap.exists() ? snap.data() : null;
+    randomResetCode() { return String(Math.floor(100000 + Math.random() * 900000)); },
+    // The ONLY place a reset window is opened — sets resetAllowed/
+    // resetExpiresAt/resetCode on the scouters doc in one write (lead-
+    // only per the rules) and returns the freshly-generated code so the
+    // caller can show it to the lead. The code is NEVER written anywhere
+    // a logged-out or different-account client can read — only this
+    // scouters doc (lead/owner-only get) and whatever the lead does with
+    // it off-app (reading it aloud to the actual student in person).
+    async leadAllowPasswordReset(scouterId) {
+      const code = this.randomResetCode();
+      await updateDoc(doc(db, 'scouters', scouterId), { resetAllowed: true, resetExpiresAt: this.resetExpiryTimestamp(), resetCode: code });
+      return code;
     },
     watchResetRequests(cb) {
       return onSnapshot(collection(db, 'resetRequests'), snap => {
@@ -822,16 +827,19 @@
     // ONE atomic batch — the rules require it (resetBatchConsistent()
     // checks what ALL THREE of these documents will look like once the
     // whole batch commits, which is only meaningful if they commit
-    // together or not at all). This is also what makes the reset
-    // single-use: the scouters update flips resetAllowed to false in the
-    // SAME breath that authLinks/usernames get re-pointed, so a replay
-    // of this exact batch (or a second device racing it) fails
-    // resetIsLiveFor() the instant the first one lands.
-    async completeReset({ username, scouterId, newUid, newAuthEmail }) {
+    // together or not at all). The scouters write is also where the
+    // submitted `code` is actually verified, server-side, against the
+    // stored resetCode — a wrong code fails THAT write's own rule, which
+    // rejects the whole batch, so authLinks/usernames never get created
+    // either. This is also what makes the reset single-use: resetAllowed/
+    // resetCode flip off in the SAME breath authLinks/usernames get
+    // re-pointed, so a replay or a second device racing it fails the
+    // instant the first (correctly-coded) attempt lands.
+    async completeReset({ username, scouterId, newUid, newAuthEmail, code }) {
       const batch = writeBatch(db);
       batch.set(doc(db, 'authLinks', newUid), { scouterId });
       batch.update(doc(db, 'usernames', username), { scouterId, uid: newUid, authEmail: newAuthEmail });
-      batch.update(doc(db, 'scouters', scouterId), { resetAllowed: false, resetExpiresAt: null });
+      batch.update(doc(db, 'scouters', scouterId), { resetAllowed: false, resetExpiresAt: null, resetCode: null, resetCodeAttempt: code });
       await batch.commit();
     },
   };
@@ -1589,7 +1597,7 @@
     </div>
     <div class="hint" id="wayForgotHint"></div>
     <button class="btn btn-primary" id="wayForgotSubmitBtn" style="width:100%;margin-top:8px;">Request Reset</button>
-    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayForgotGoResetLink">My lead already allowed a reset</a></div>
+    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayForgotGoResetLink">I have a reset code from my lead</a></div>
     <div class="hint" style="text-align:center;margin-top:6px;"><a href="#" id="wayForgotBackLink">Back to sign in</a></div>
   </div>
   <!-- Forgot-password step 2: lead has flipped resetAllowed; pick a new password. -->
@@ -1597,6 +1605,10 @@
     <div class="field">
       <label>Username</label>
       <input type="text" id="wayResetPwUsername" placeholder="Your username" autocapitalize="off" autocorrect="off" enterkeyhint="next" />
+    </div>
+    <div class="field">
+      <label>Reset Code</label>
+      <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" id="wayResetPwCode" placeholder="6-digit code from your lead" autocapitalize="off" autocorrect="off" enterkeyhint="next" />
     </div>
     <div class="field">
       <label>New Password</label>
@@ -5629,9 +5641,10 @@ async function signInAccount(usernameRaw, password) {
 // Forgot password, step 1: a logged-out student (by definition — they
 // forgot their password) cannot write to their own scouters doc, so this
 // writes to the separate, permissively-writable resetRequests/{username}
-// doc instead (see firestore.rules) — the lead reads THAT list and is the
-// one who actually flips scouters/{id}.resetAllowed with a real
-// authenticated write.
+// doc instead (see firestore.rules) — the lead sees it in their Scouters
+// screen and generates a one-time 6-digit code there, which they read to
+// the student in person (never written anywhere a logged-out client can
+// read).
 async function requestPasswordReset(usernameRaw) {
   const uname = normUsername(usernameRaw);
   if (!uname) return 'Enter your username.';
@@ -5642,39 +5655,37 @@ async function requestPasswordReset(usernameRaw) {
   try { await window.FB.requestReset(uname); } catch (err) { return 'Needs internet — try again when online.'; }
   return null;
 }
-// Forgot password, step 2: the lead has flipped resetAllowed (mirrored
-// into resetRequests, the one doc a logged-out client can read — see
-// firestore.rules) — create a BRAND NEW Firebase Auth account (there is
-// no server-side "change this user's password" without Cloud Functions on
-// the free plan) and re-point usernames/{uname} at it, keeping the SAME
-// scouterId/history. newUid becomes the account's identity going forward;
-// the old uid's authLinks doc is simply abandoned (harmless, unused).
-async function completePasswordReset(usernameRaw, newPassword) {
+// Forgot password, step 2: the student types the 6-digit code their lead
+// read to them in person, plus a new password. There is no pre-check read
+// here (there's nothing left a logged-out client CAN read that would
+// tell them anything — resetRequests is lead-only now, and the scouters
+// doc always has been) — this goes straight to creating a BRAND NEW
+// Firebase Auth account (no server-side "change this user's password"
+// without Cloud Functions on the free plan) and attempting the real
+// atomic batch, which is also where the code is actually verified,
+// server-side, by the rules. A wrong code, an expired/not-live window, or
+// no window at all all surface as the same generic failure — the code
+// itself is never confirmed or denied independently of actually
+// completing the reset, so there's nothing to a logged-out client to
+// probe with repeated guesses beyond "did this exact attempt work."
+async function completePasswordReset(usernameRaw, newPassword, code) {
   const uname = normUsername(usernameRaw);
   if (newPassword.length < 8) return { ok: false, error: 'Password must be at least 8 characters.' };
+  if (!/^\d{6}$/.test(code || '')) return { ok: false, error: 'Enter the 6-digit code from your lead.' };
   let unameDoc;
   try { unameDoc = await window.FB.getUsernameDoc(uname); }
   catch (err) { return { ok: false, error: 'Needs internet — try again when online.' }; }
   if (!unameDoc) return { ok: false, error: 'Username not found.' };
-  // NOT getScouterDoc() here — the student is logged out by definition
-  // (that's what "forgot password" means), and that doc requires being
-  // signed in as this exact account to read at all. resetRequests is the
-  // one doc a logged-out client CAN read, and the lead's "Allow reset"
-  // mirrors resetAllowed into it for exactly this reason.
-  let resetReq;
-  try { resetReq = await window.FB.getResetRequest(uname); }
-  catch (err) { return { ok: false, error: 'Needs internet — try again when online.' }; }
-  if (!resetReq || !resetReq.allowed) return { ok: false, error: 'Your lead hasn\'t allowed a reset yet.' };
   const gen = (Number((unameDoc.authEmail.match(/\.(\d+)@/) || [])[1]) || 1) + 1;
   const newAuthEmail = `${uname}.${gen}@${window.FB.INTERNAL_DOMAIN}`;
   let newUid;
   try { newUid = await window.FB.createAccount(newAuthEmail, newPassword); }
   catch (err) { return { ok: false, error: 'Reset failed — check your connection and try again.' }; }
   try {
-    await window.FB.completeReset({ username: uname, scouterId: unameDoc.scouterId, newUid, newAuthEmail });
+    await window.FB.completeReset({ username: uname, scouterId: unameDoc.scouterId, newUid, newAuthEmail, code });
   } catch (err) {
     try { await window.FB.deleteCurrentUser(); } catch (e2) {}
-    return { ok: false, error: 'Reset failed — ask your lead to allow it again and retry.' };
+    return { ok: false, error: 'Wrong code, or no reset is currently allowed — ask your lead.' };
   }
   return { ok: true, scouterId: unameDoc.scouterId, uid: newUid };
 }
@@ -7040,15 +7051,14 @@ function renderScoutersScreen() {
     if (name && name.trim()) await window.FB.leadUpdateScouter(b.dataset.scouterRename, { name: name.trim(), renamedAt: new Date().toISOString() });
   }));
   root.querySelectorAll('[data-scouter-allowreset]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Allow a password reset for this scouter? They\'ll be able to set a brand-new password next time they use "Forgot password."')) return;
+    if (!confirm('Allow a password reset for this scouter? You\'ll get a one-time code to read to them in person.')) return;
     const scouterId = b.dataset.scouterAllowreset;
     const acct = _latestScouters.find(a => a.id === scouterId);
-    await window.FB.leadUpdateScouter(scouterId, { resetAllowed: true, resetExpiresAt: window.FB.resetExpiryTimestamp() });
-    // Mirrored into resetRequests too — completePasswordReset() runs
-    // while the student is logged out, and only THIS doc is readable
-    // then (see its own comment in firestore.rules).
-    if (acct && acct.username) await window.FB.setResetAllowed(acct.username, true);
-    showToast('Reset allowed for 30 minutes — tell them to use Forgot password > "My lead already allowed a reset"');
+    const code = await window.FB.leadAllowPasswordReset(scouterId);
+    if (acct && acct.username) await window.FB.clearResetRequest(acct.username);
+    // alert(), not a toast — this has to stay on screen long enough to
+    // actually read the code aloud, not disappear in a couple seconds.
+    alert(`Reset code for ${(acct && acct.name) || 'this scouter'}: ${code}\n\nRead this to them now — it expires in 30 minutes and works once.`);
   }));
   root.querySelectorAll('[data-scouter-signoutall]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('Sign out this account everywhere? Any device currently signed in will be signed out next time it\'s online.')) return;
@@ -7065,9 +7075,10 @@ function renderScoutersScreen() {
   root.querySelectorAll('[data-resetreq-allow]').forEach(b => b.addEventListener('click', async () => {
     const uname = b.dataset.resetreqAllow;
     const acct = _latestScouters.find(a => a.username === uname);
-    if (acct) await window.FB.leadUpdateScouter(acct.id, { resetAllowed: true, resetExpiresAt: window.FB.resetExpiryTimestamp() });
-    await window.FB.setResetAllowed(uname, true);
-    showToast('Reset allowed for 30 minutes');
+    if (!acct) { showToast('Account not found', true); return; }
+    const code = await window.FB.leadAllowPasswordReset(acct.id);
+    await window.FB.clearResetRequest(uname);
+    alert(`Reset code for ${acct.name || uname}: ${code}\n\nRead this to them now — it expires in 30 minutes and works once.`);
   }));
   root.querySelectorAll('[data-resetreq-dismiss]').forEach(b => b.addEventListener('click', async () => {
     await window.FB.clearResetRequest(b.dataset.resetreqDismiss);
@@ -7308,6 +7319,7 @@ function renderWhoAreYou() {
     document.getElementById('wayForgotHint').textContent = '';
   } else if (wayMode === 'resetpw') {
     document.getElementById('wayResetPwUsername').value = '';
+    document.getElementById('wayResetPwCode').value = '';
     document.getElementById('wayResetPwPassword').value = '';
     document.getElementById('wayResetPwHint').textContent = '';
   } else if (wayMode === 'pending') {
@@ -7420,11 +7432,12 @@ document.getElementById('wayForgotSubmitBtn').addEventListener('click', async ()
 });
 document.getElementById('wayResetPwSubmitBtn').addEventListener('click', async () => {
   const username = document.getElementById('wayResetPwUsername').value.trim();
+  const code = document.getElementById('wayResetPwCode').value.trim();
   const password = document.getElementById('wayResetPwPassword').value;
   const hint = document.getElementById('wayResetPwHint');
   if (!username) { hint.textContent = 'Enter your username.'; return; }
   hint.textContent = 'Setting new password…';
-  const result = await completePasswordReset(username, password);
+  const result = await completePasswordReset(username, password, code);
   if (!result.ok) { hint.textContent = result.error; return; }
   const scouterDoc = await window.FB.getScouterDoc(result.scouterId);
   const sessionId = genShortId();
