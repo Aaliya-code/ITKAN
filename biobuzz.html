@@ -695,12 +695,12 @@
 <script type="module">
   import { initializeApp } from './vendor/firebase/firebase-app.js';
   import {
-    getAuth, setPersistence, indexedDBLocalPersistence, connectAuthEmulator,
+    getAuth, setPersistence, indexedDBLocalPersistence, browserSessionPersistence, connectAuthEmulator,
     createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, deleteUser, onAuthStateChanged,
   } from './vendor/firebase/firebase-auth.js';
   import {
     initializeFirestore, persistentLocalCache, persistentMultipleTabManager, connectFirestoreEmulator,
-    doc, getDoc, getDocFromCache, setDoc, updateDoc, deleteDoc, onSnapshot, collection, writeBatch, Timestamp,
+    doc, getDoc, getDocFromCache, setDoc, updateDoc, deleteDoc, onSnapshot, collection, writeBatch, Timestamp, serverTimestamp,
   } from './vendor/firebase/firebase-firestore.js';
 
   // Fill these in from Firebase Console > Project settings > Your apps > Web
@@ -730,16 +730,25 @@
     connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
     connectFirestoreEmulator(db, '127.0.0.1', 8089);
   }
-  // Defensive/explicit — this is already the modular SDK's web default, but
-  // stated outright since "stay signed in through a full close/offline
-  // reopen" is a hard requirement, not an incidental nice-to-have.
-  await setPersistence(auth, indexedDBLocalPersistence);
+  // Installed (Home Screen / desktop app) vs a plain browser tab decides
+  // Auth persistence, computed independently here (never from the classic
+  // script below — module scripts are deferred and may run before OR after
+  // it, and this must be right before anything else touches auth). Installed
+  // gets indexedDB persistence (survives close/restart/offline, until Sign
+  // out). A browser tab gets SESSION persistence (sessionStorage-backed) —
+  // closing the tab/window drops it; reloading the same tab keeps it.
+  const isInstalledMode = window.matchMedia('(display-mode: standalone)').matches
+    || window.matchMedia('(display-mode: fullscreen)').matches
+    || window.matchMedia('(display-mode: minimal-ui)').matches
+    || window.navigator.standalone === true;
+  await setPersistence(auth, isInstalledMode ? indexedDBLocalPersistence : browserSessionPersistence);
 
   const FIREBASE_INTERNAL_DOMAIN = 'biobuzz-accounts.internal';
 
   window.FB = {
     INTERNAL_DOMAIN: FIREBASE_INTERNAL_DOMAIN,
     isLocalDev,
+    isInstalledMode,
     onAuthChange(cb) { return onAuthStateChanged(auth, cb); },
     async createAccount(email, password) {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
@@ -771,7 +780,7 @@
       batch.set(doc(db, 'authLinks', uid), { scouterId });
       batch.set(doc(db, 'scouters', scouterId), {
         name, username: usernameDisplay, status: 'pending', role: 'scouter', isOwner: false,
-        sessionId: '', deviceId: '', resetRequested: false, resetRequestedAt: null, resetAllowed: false,
+        sessionId: '', deviceId: '', sessionActive: false, resetRequested: false, resetRequestedAt: null, resetAllowed: false,
         createdAt: new Date().toISOString(),
       });
       await batch.commit();
@@ -792,6 +801,39 @@
       return onSnapshot(doc(db, 'scouters', scouterId), snap => cb(snap.exists() ? { id: snap.id, ...snap.data() } : null, snap.metadata.fromCache), () => {});
     },
     async updateScouterSelf(scouterId, fields) { await updateDoc(doc(db, 'scouters', scouterId), fields); },
+    // ONE SESSION PER ACCOUNT, FIRST SESSION WINS — this is the only write
+    // that can ever flip sessionActive false -> true, and the rules refuse
+    // it outright if another session is already active (installed, or a
+    // browser session whose lastSeenAt heartbeat is still within the last
+    // 3 minutes). A permission-denied here means "someone else already
+    // holds this account" — the caller signs out of Firebase Auth
+    // immediately and shows the alert (see signInAccount()).
+    // lastSeenAt is ALWAYS serverTimestamp(), never a client clock value —
+    // security rules compare it against request.time, and a client-chosen
+    // Timestamp could otherwise let a malicious client claim to be fresher
+    // than it really is. Firestore resolves serverTimestamp() to the exact
+    // commit time, which is what rules then see as request.resource.data.lastSeenAt.
+    async startSession(scouterId, { sessionId, sessionMode, deviceId: devId }) {
+      await updateDoc(doc(db, 'scouters', scouterId), {
+        sessionActive: true, sessionId, sessionMode, deviceId: devId, lastSeenAt: serverTimestamp(),
+        sessionChangedAt: new Date().toISOString(), lastSignInAt: new Date().toISOString(),
+      });
+    },
+    // Browser-mode-only liveness ping (installed sessions never expire, so
+    // they never need this) — fails harmlessly if this is no longer the
+    // active session (sessionActive already false, e.g. the lead ended it).
+    async heartbeatSession(scouterId) {
+      await updateDoc(doc(db, 'scouters', scouterId), { lastSeenAt: serverTimestamp() });
+    },
+    // Ending YOUR OWN current session — sessionId is sent unchanged (not
+    // just sessionActive) so the rule can confirm this write still refers
+    // to the session this device actually holds; a queued offline sign-out
+    // that arrives late, after someone else has since taken the slot, is
+    // rejected instead of wrongly ending THEIR session (stale sessionId no
+    // longer matches what the rule sees as the doc's current one).
+    async endSessionSelf(scouterId, sessionId) {
+      await updateDoc(doc(db, 'scouters', scouterId), { sessionActive: false, sessionId });
+    },
     watchScouters(cb) {
       return onSnapshot(collection(db, 'scouters'), snap => {
         cb(snap.docs.map(d => ({ id: d.id, ...d.data() })), snap.metadata.fromCache);
@@ -841,7 +883,12 @@
       const batch = writeBatch(db);
       batch.set(doc(db, 'authLinks', newUid), { scouterId });
       batch.update(doc(db, 'usernames', username), { scouterId, uid: newUid, authEmail: newAuthEmail });
-      batch.update(doc(db, 'scouters', scouterId), { resetAllowed: false, resetExpiresAt: null, resetCode: null, resetCodeAttempt: code });
+      // sessionActive: false — a reset is often exactly "I lost/can't use my
+      // old device," and that old device's session must not go on blocking
+      // the whole point of resetting (signing in again) under one-session-
+      // first-wins. The immediately-following startSession() call (see
+      // completePasswordReset()) is what actually claims a fresh session.
+      batch.update(doc(db, 'scouters', scouterId), { resetAllowed: false, resetExpiresAt: null, resetCode: null, resetCodeAttempt: code, sessionActive: false });
       await batch.commit();
     },
   };
@@ -1538,12 +1585,16 @@
 <div class="review-overlay" id="whoAreYouOverlay" style="display:none;">
   <div class="team-banner-slot"></div>
   <h2 class="section-title">Who are you?</h2>
+  <div class="hint" id="wayBrowserModeNote" style="display:none;text-align:center;margin-bottom:10px;">Using the installed app? Sign in there first — signing in here only works if you're not already signed in anywhere else.</div>
   <!-- A device that's never been signed in AND has no internet right now
        — sign-up/sign-in both need a real Firebase round trip. -->
   <div class="card" id="wayOfflineFirstCard" style="display:none;text-align:center;">
     <div class="hint">Sign in needs internet — do it before the event.</div>
+    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayOfflineSendUnsentLink" style="display:none;">Send my unsent data</a></div>
   </div>
-  <!-- Sign-in mode. -->
+  <!-- Sign-in mode. Both Sign In and Create Account are big, equally
+       visible buttons — this is the app's sign-in GATE now (shown first,
+       before anything else), not a secondary screen reached by choice. -->
   <div class="card" id="waySignInCard" style="display:none;">
     <div class="field">
       <label>Username</label>
@@ -1558,9 +1609,9 @@
     </div>
     <div class="hint" id="waySignInHint"></div>
     <button class="btn btn-primary" id="waySignInBtn" style="width:100%;margin-top:8px;">Sign In</button>
-    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayGoSignupLink">New here? Create an account</a></div>
-    <div class="hint" style="text-align:center;margin-top:6px;"><a href="#" id="wayGoForgotLink">Forgot password?</a></div>
-    <div class="hint" style="text-align:center;margin-top:6px;"><a href="#" id="wayNotNowLink">Not now — I just need to send/reset</a></div>
+    <button class="btn btn-secondary" id="wayGoSignupBtn" style="width:100%;margin-top:8px;">Create Account</button>
+    <div class="hint" style="text-align:center;margin-top:10px;"><a href="#" id="wayGoForgotLink">Forgot password?</a></div>
+    <div class="hint" style="text-align:center;margin-top:6px;"><a href="#" id="wayNotNowLink" style="display:none;">Send my unsent data</a></div>
   </div>
   <!-- Sign-up mode: create a brand-new pending account, held for lead approval online. -->
   <div class="card" id="waySignUpCard" style="display:none;">
@@ -4691,13 +4742,25 @@ document.getElementById('importJsonInput').addEventListener('change', async (e) 
 // things this deliberately leaves behind are the service worker's own
 // cache (the app itself) and the browser's own unrelated settings.
 async function wipeDeviceCompletely() {
-  const PREFIX = 'biobuzz2026';
-  const keysToRemove = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k === PREFIX || k.startsWith(PREFIX + '_')) keysToRemove.push(k);
+  // Ends the session BEFORE wiping anything (needs accountSession, and
+  // needs to still be Firebase-Auth-signed-in to do it — isOwnScouterId()
+  // checks request.auth.uid). Online, this frees the slot immediately for
+  // a future sign-in elsewhere. Offline, it's simply not attempted — a
+  // full device wipe has nowhere left to keep a queued retry once the
+  // prefix sweep below runs, so this one narrow case falls back to the
+  // lead's "End session" button instead of queuing across the wipe.
+  if (window.FB && accountSession) {
+    try { await window.FB.endSessionSelf(accountSession.scouterId, accountSession.sessionId); } catch (err) {}
   }
-  keysToRemove.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
+  const PREFIX = 'biobuzz2026';
+  [localStorage, sessionStorage].forEach(store => {
+    const keysToRemove = [];
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i);
+      if (k === PREFIX || k.startsWith(PREFIX + '_')) keysToRemove.push(k);
+    }
+    keysToRemove.forEach(k => { try { store.removeItem(k); } catch (e) {} });
+  });
   try { await idbClearAllImages(); } catch (err) { console.error('Failed to clear image store', err); }
   try { await idbClearEventCache(); } catch (err) { console.error('Failed to clear event cache store', err); }
   // "Reset this device signs out... but never deletes the online account" —
@@ -5459,14 +5522,24 @@ let station = (() => { try { return localStorage.getItem(LS_STATION) || ''; } ca
    the actual security model (the web config above is public).
 
    Local state, all biobuzz2026_-prefixed (swept by wipeDeviceCompletely()):
-   - accountSession: THIS device's current signed-in account, persisted so
-     it survives a full close/reopen with no network (Firebase Auth's own
-     indexedDB persistence handles re-authenticating; this is the APP's
-     own record of who that session is, read back instantly on boot).
+   - accountSession: THIS device's current signed-in account. In INSTALLED
+     mode it's in localStorage, surviving a full close/reopen with no
+     network (Firebase Auth's own indexedDB persistence handles
+     re-authenticating; this is the APP's own record of who that session
+     is, read back instantly on boot). In BROWSER TAB mode it's in
+     sessionStorage instead — same-tab reload keeps it, closing the tab/
+     window drops it, matching Firebase's own session-persistence choice
+     (see the module script above) so the two can never disagree about
+     whether this tab is still "signed in."
    - pendingSignup: a signup this device itself created, not yet approved.
+     Same storage split as accountSession, for the same reason.
    - rosterCache: the lead's own offline mirror of the whole scouters
      collection (kept fresh by a live listener whenever online), used for
-     the Scouters screen offline AND for the receive-check below.
+     the Scouters screen offline AND for the receive-check below. Always
+     localStorage regardless of mode — it's a cache of PUBLIC roster data
+     a signed-in lead has already seen, not a sign-in credential, and a
+     browser-tab lead re-opening the Scouters screen after a reload
+     benefits from it exactly like an installed lead would.
 
    Positioned here (before setScouterName) deliberately — applyScouterNameLockUI()
    below is called from top-level script execution in the init block
@@ -5476,10 +5549,14 @@ let station = (() => { try { return localStorage.getItem(LS_STATION) || ''; } ca
 const LS_ACCOUNT_SESSION = 'biobuzz2026_accountSession';
 const LS_PENDING_SIGNUP = 'biobuzz2026_pendingSignup';
 const LS_ROSTER_CACHE = 'biobuzz2026_rosterCache';
-let accountSession = (() => { try { return JSON.parse(localStorage.getItem(LS_ACCOUNT_SESSION)) || null; } catch (e) { return null; } })();
-function saveAccountSession() { try { if (accountSession) localStorage.setItem(LS_ACCOUNT_SESSION, JSON.stringify(accountSession)); else localStorage.removeItem(LS_ACCOUNT_SESSION); } catch (e) {} }
-let pendingSignup = (() => { try { return JSON.parse(localStorage.getItem(LS_PENDING_SIGNUP)) || null; } catch (e) { return null; } })();
-function savePendingSignup() { try { if (pendingSignup) localStorage.setItem(LS_PENDING_SIGNUP, JSON.stringify(pendingSignup)); else localStorage.removeItem(LS_PENDING_SIGNUP); } catch (e) {} }
+// isStandaloneApp() is a `function` declaration further down this same
+// script, so it's safely hoisted and callable from here despite appearing
+// textually later (unlike a `let`/`const`, which would TDZ).
+function sessionStorageBackend() { return isStandaloneApp() ? localStorage : sessionStorage; }
+let accountSession = (() => { try { return JSON.parse(sessionStorageBackend().getItem(LS_ACCOUNT_SESSION)) || null; } catch (e) { return null; } })();
+function saveAccountSession() { try { const s = sessionStorageBackend(); if (accountSession) s.setItem(LS_ACCOUNT_SESSION, JSON.stringify(accountSession)); else s.removeItem(LS_ACCOUNT_SESSION); } catch (e) {} }
+let pendingSignup = (() => { try { return JSON.parse(sessionStorageBackend().getItem(LS_PENDING_SIGNUP)) || null; } catch (e) { return null; } })();
+function savePendingSignup() { try { const s = sessionStorageBackend(); if (pendingSignup) s.setItem(LS_PENDING_SIGNUP, JSON.stringify(pendingSignup)); else s.removeItem(LS_PENDING_SIGNUP); } catch (e) {} }
 let rosterCache = (() => { try { const v = JSON.parse(localStorage.getItem(LS_ROSTER_CACHE)); if (v && Array.isArray(v.accounts)) return v; } catch (e) {} return { fetchedAt: null, accounts: [] }; })();
 function saveRosterCache() { try { localStorage.setItem(LS_ROSTER_CACHE, JSON.stringify(rosterCache)); } catch (e) {} }
 function rosterCacheUpsert(data) {
@@ -5560,10 +5637,18 @@ async function handleReviewDeepLink() {
   if (!scouterId) return;
   if (!isSignedInAsLead()) {
     pendingReviewScouterId = scouterId;
-    if (deviceRole !== 'lead') {
-      showToast('Enter the Lead PIN to review this sign-up.', true);
-      openRoleGate();
+    if (!accountSession) {
+      // The universal sign-in gate (shown first, before anything else,
+      // whenever no one is signed in) is already covering the screen in
+      // this case — just remember the target and get out of the way,
+      // rather than opening a SECOND overlay on top of it.
+      // beginAccountSession() re-calls this the moment a lead account
+      // finishes signing in, whichever path got them there.
+      showToast('Sign in as a lead to review this sign-up.', true);
     } else {
+      // Signed in, but not as a lead (e.g. a scouter account on a
+      // lead-role device) — the gate isn't up, so point them at where a
+      // lead sign-in actually happens.
       showToast('Sign in to your lead account (Export page) to review this sign-up.', true);
       document.querySelector('nav button[data-page="export"]').click();
     }
@@ -5619,14 +5704,54 @@ function beginAccountSession({ scouterId, uid, sessionId, name, username, role, 
   // as a lead picks back up the instant it is — see handleReviewDeepLink().
   if (role === 'lead' && pendingReviewScouterId) handleReviewDeepLink();
 }
+const LS_PENDING_SESSION_END = 'biobuzz2026_pendingSessionEnd';
+function loadPendingSessionEnd() {
+  try { return JSON.parse(sessionStorageBackend().getItem(LS_PENDING_SESSION_END)) || null; } catch (e) { return null; }
+}
+let pendingSessionEnd = loadPendingSessionEnd();
+function savePendingSessionEnd() {
+  try {
+    const s = sessionStorageBackend();
+    if (pendingSessionEnd) s.setItem(LS_PENDING_SESSION_END, JSON.stringify(pendingSessionEnd));
+    else s.removeItem(LS_PENDING_SESSION_END);
+  } catch (e) {}
+}
+// Ending a session needs to write Firestore WHILE STILL AUTHENTICATED AS
+// THAT ACCOUNT (the rules' isOwnScouterId() check needs request.auth.uid)
+// — so Firebase Auth sign-out only happens AFTER that write succeeds, not
+// before. Offline, the write is queued and retried on 'online'; the app
+// still looks signed out immediately either way (accountSession is
+// cleared right away) — Firebase Auth just stays quietly alive in the
+// background until the queued write finally lands.
 async function endAccountSession() {
   stopSessionWatcher();
+  const toEnd = accountSession ? { scouterId: accountSession.scouterId, sessionId: accountSession.sessionId } : null;
   accountSession = null;
   saveAccountSession();
   applyScouterNameLockUI();
   renderLeadAccountCard();
-  try { await window.FB.signOutNow(); } catch (e) {}
+  if (toEnd) await endSessionWithQueue(toEnd);
 }
+async function endSessionWithQueue(target) {
+  try {
+    await window.FB.endSessionSelf(target.scouterId, target.sessionId);
+    try { await window.FB.signOutNow(); } catch (e) {}
+  } catch (err) {
+    pendingSessionEnd = target;
+    savePendingSessionEnd();
+    showToast("Your sign-out will finish when you're back online.", true);
+  }
+}
+async function retryPendingSessionEnd() {
+  if (!pendingSessionEnd) return;
+  try {
+    await window.FB.endSessionSelf(pendingSessionEnd.scouterId, pendingSessionEnd.sessionId);
+    try { await window.FB.signOutNow(); } catch (e) {}
+    pendingSessionEnd = null;
+    savePendingSessionEnd();
+  } catch (err) { /* still offline, or someone else already ended it — leave queued */ }
+}
+window.addEventListener('online', retryPendingSessionEnd);
 
 // The live "signed in on another device" AND "deactivated immediately"
 // enforcement are the SAME listener — both are just "does the doc still
@@ -5650,6 +5775,16 @@ function startSessionWatcher() {
     if (doc.sessionId !== mySessionId) {
       endAccountSession();
       showToast('You signed in on another device.', true);
+      return;
+    }
+    // One-session-first-wins means a NEW sign-in can never steal
+    // sessionId out from under this device anymore (it's refused
+    // outright) — the only way this device's OWN session now ends from
+    // the server side is the lead's "End session" button, which flips
+    // sessionActive without touching sessionId at all.
+    if (doc.sessionActive === false) {
+      endAccountSession();
+      showToast('Your session was ended by your lead.', true);
     }
   });
 }
@@ -5704,11 +5839,19 @@ function resolvePendingUpdate(doc) {
     const { scouterId, uid } = pendingSignup;
     const sessionId = genShortId();
     pendingSignup = null; savePendingSignup(); stopPendingWatcher();
-    window.FB.updateScouterSelf(scouterId, { sessionId, deviceId, sessionChangedAt: new Date().toISOString(), lastSignInAt: new Date().toISOString() })
+    window.FB.startSession(scouterId, { sessionId, sessionMode: currentSessionMode(), deviceId })
       .then(() => {
         beginAccountSession({ scouterId, uid, sessionId, name: doc.name, username: doc.username, role: doc.role, isOwner: doc.isOwner });
         wayMode = 'ready';
         renderWhoAreYou();
+      })
+      // A freshly-approved account should never already have an active
+      // session, but if it somehow does (e.g. approved twice, a race),
+      // fail the same way signInAccount() does rather than leave the
+      // device stuck Auth-signed-in with no local session.
+      .catch(async () => {
+        try { await window.FB.signOutNow(); } catch (e) {}
+        showToast('Sign-in was blocked — this account is already signed in elsewhere.', true);
       });
   } else if (doc.status === 'denied') {
     pendingSignup = null; savePendingSignup(); stopPendingWatcher();
@@ -5745,9 +5888,34 @@ async function signInAccount(usernameRaw, password) {
     return 'pending';
   }
   const sessionId = genShortId();
-  await window.FB.updateScouterSelf(scouterDoc.id, { sessionId, deviceId, sessionChangedAt: new Date().toISOString(), lastSignInAt: new Date().toISOString() });
+  try {
+    await window.FB.startSession(scouterDoc.id, { sessionId, sessionMode: currentSessionMode(), deviceId });
+  } catch (err) {
+    // ONE SESSION PER ACCOUNT, FIRST SESSION WINS — Firebase Auth already
+    // signed this device in (there's no way to gate THAT), so a refused
+    // session-start write means someone else already holds this account;
+    // back out of the Auth sign-in immediately rather than leave the
+    // device Auth-signed-in but with no local session of its own.
+    try { await window.FB.signOutNow(); } catch (e2) {}
+    return describeBlockingSessionAlert(scouterDoc);
+  }
   beginAccountSession({ scouterId: scouterDoc.id, uid, sessionId, name: scouterDoc.name, username: scouterDoc.username, role: scouterDoc.role, isOwner: scouterDoc.isOwner });
   return null;
+}
+// "You're already signed in on another device/app (installed or browser,
+// last active <time>). Sign out there first, or ask your lead to end that
+// session." — built from whatever the (still-readable, since a scouter can
+// always get() their own doc) scouterDoc shows for the session that's
+// blocking this one.
+function describeBlockingSessionAlert(scouterDoc) {
+  const mode = scouterDoc.sessionMode === 'installed' ? 'installed app' : 'browser';
+  let when = 'recently';
+  if (scouterDoc.lastSeenAt && typeof scouterDoc.lastSeenAt.toDate === 'function') {
+    when = scouterDoc.lastSeenAt.toDate().toLocaleString();
+  } else if (scouterDoc.sessionMode === 'installed') {
+    when = 'an installed session (does not expire on its own)';
+  }
+  return `You're already signed in on another device/app (${mode}, last active ${when}). Sign out there first, or ask your lead to end that session.`;
 }
 
 // Forgot password, step 1: a logged-out student (by definition — they
@@ -5821,8 +5989,12 @@ function isIOSDevice() {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 function isStandaloneApp() {
-  return !!window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  return !!window.navigator.standalone
+    || window.matchMedia('(display-mode: standalone)').matches
+    || window.matchMedia('(display-mode: fullscreen)').matches
+    || window.matchMedia('(display-mode: minimal-ui)').matches;
 }
+function currentSessionMode() { return isStandaloneApp() ? 'installed' : 'browser'; }
 function maybeShowAddToHomeScreenTip() {
   if (!isIOSDevice() || isStandaloneApp()) return;
   let shown = false;
@@ -6014,6 +6186,13 @@ document.getElementById('pinSubmitBtn').addEventListener('click', async () => {
   applyRoleUI();
   document.getElementById('pinOverlay').style.display = 'none';
   showToast('Lead mode on');
+  // A #review= deep link that arrived before this device was EVER
+  // PIN-unlocked (a brand-new device, not the usual case of a lead
+  // device just re-authenticating Firebase) — isSignedInAsLead() needs
+  // BOTH deviceRole and accountSession.role to be 'lead', so the
+  // beginAccountSession() hook alone can't resume it if sign-in happened
+  // first; this covers the other order.
+  if (pendingReviewScouterId) handleReviewDeepLink();
 });
 document.getElementById('pinInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('pinSubmitBtn').click();
@@ -7088,6 +7267,15 @@ function scouterEntriesCountAndLastSync(scouterId) {
   return { count: mine.length, lastSync };
 }
 function amActiveOwnerLocal() { return !!(accountSession && accountSession.isOwner); }
+// lastSeenAt is a real Firestore Timestamp when read live via the SDK,
+// but rosterCache round-trips it through JSON (localStorage), which
+// strips the .toDate() method off — handles both shapes.
+function formatLastSeen(ts) {
+  if (!ts) return 'never';
+  if (typeof ts.toDate === 'function') return ts.toDate().toLocaleString();
+  if (typeof ts.seconds === 'number') return new Date(ts.seconds * 1000).toLocaleString();
+  return 'unknown';
+}
 function scouterRowHtml(a) {
   const { count, lastSync } = scouterEntriesCountAndLastSync(a.id);
   const actions = [];
@@ -7109,7 +7297,14 @@ function scouterRowHtml(a) {
       actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-rename="${esc(a.id)}">Rename</button>`);
     }
     actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-allowreset="${esc(a.id)}">Allow password reset</button>`);
-    actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-signoutall="${esc(a.id)}">Sign out everywhere</button>`);
+    // Only shown when a session is actually active — for a lost/dead
+    // device whose owner can't sign out themselves. Shows exactly what
+    // the lead needs to judge whether that's safe (mode, device, last
+    // active) before ending it out from under someone.
+    if (a.sessionActive) {
+      const modeLabel = a.sessionMode === 'installed' ? 'installed app' : 'browser';
+      actions.push(`<button class="btn btn-secondary btn-sm" data-scouter-endsession="${esc(a.id)}">End session (${esc(modeLabel)}, last active ${esc(formatLastSeen(a.lastSeenAt))})</button>`);
+    }
     if (!a.isOwner && amActiveOwnerLocal()) {
       actions.push(a.role === 'lead'
         ? `<button class="btn btn-secondary btn-sm" data-scouter-demote="${esc(a.id)}">Demote to scouter</button>`
@@ -7155,8 +7350,12 @@ function renderScoutersScreen() {
   const root = document.getElementById('scoutersOverlay');
   root.querySelectorAll('[data-scouter-approve]').forEach(b => b.addEventListener('click', async () => { await window.FB.leadUpdateScouter(b.dataset.scouterApprove, { status: 'active', approvedAt: new Date().toISOString() }); }));
   root.querySelectorAll('[data-scouter-deny]').forEach(b => b.addEventListener('click', async () => { if (confirm('Deny this pending signup?')) await window.FB.leadUpdateScouter(b.dataset.scouterDeny, { status: 'denied' }); }));
-  root.querySelectorAll('[data-scouter-deactivate]').forEach(b => b.addEventListener('click', async () => { await window.FB.leadUpdateScouter(b.dataset.scouterDeactivate, { status: 'deactivated', deactivatedAt: new Date().toISOString() }); }));
-  root.querySelectorAll('[data-scouter-reactivate]').forEach(b => b.addEventListener('click', async () => { await window.FB.leadUpdateScouter(b.dataset.scouterReactivate, { status: 'active', deactivatedAt: null }); }));
+  root.querySelectorAll('[data-scouter-deactivate]').forEach(b => b.addEventListener('click', async () => { await window.FB.leadUpdateScouter(b.dataset.scouterDeactivate, { status: 'deactivated', deactivatedAt: new Date().toISOString(), sessionActive: false }); }));
+  // sessionActive: false — clears whatever stale session existed from
+  // before the deactivation (that device was already force-signed-out by
+  // its own watcher), so a reactivated account can sign in again right
+  // away instead of being wrongly blocked by one-session-first-wins.
+  root.querySelectorAll('[data-scouter-reactivate]').forEach(b => b.addEventListener('click', async () => { await window.FB.leadUpdateScouter(b.dataset.scouterReactivate, { status: 'active', deactivatedAt: null, sessionActive: false }); }));
   root.querySelectorAll('[data-scouter-rename]').forEach(b => b.addEventListener('click', async () => {
     const a = _latestScouters.find(x => x.id === b.dataset.scouterRename);
     const name = prompt('New name:', a ? a.name : '');
@@ -7172,9 +7371,9 @@ function renderScoutersScreen() {
     // actually read the code aloud, not disappear in a couple seconds.
     alert(`Reset code for ${(acct && acct.name) || 'this scouter'}: ${code}\n\nRead this to them now — it expires in 30 minutes and works once.`);
   }));
-  root.querySelectorAll('[data-scouter-signoutall]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('Sign out this account everywhere? Any device currently signed in will be signed out next time it\'s online.')) return;
-    await window.FB.leadUpdateScouter(b.dataset.scouterSignoutall, { sessionId: genShortId(), sessionChangedAt: new Date().toISOString() });
+  root.querySelectorAll('[data-scouter-endsession]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm("End this account's session? Use this for a lost or dead device — they'll need to sign in again to use it elsewhere.")) return;
+    await window.FB.leadUpdateScouter(b.dataset.scouterEndsession, { sessionActive: false });
   }));
   root.querySelectorAll('[data-scouter-promote]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('Promote this scouter to lead?')) return;
@@ -7405,10 +7604,17 @@ function applySetupPayload(payload) {
 let wayMode = 'signin'; // 'signin' | 'signup' | 'forgot' | 'resetpw' | 'pending' | 'denied' | 'offline-new' | 'ready'
 let wayDeniedMessage = '';
 const WAY_CARDS = { 'signin': 'waySignInCard', 'signup': 'waySignUpCard', 'forgot': 'wayForgotCard', 'resetpw': 'wayResetPwCard', 'pending': 'wayPendingCard', 'denied': 'wayDeniedCard', 'offline-new': 'wayOfflineFirstCard' };
+// The ONE exception to "no bypassing the sign-in gate" — a device sitting
+// on unsent entries must always have a way to send them, signed in or not.
+function hasUnsentEntries() { return matches.some(m => !m.sent) || pits.some(p => !p.sent); }
 function renderWhoAreYou() {
   Object.values(WAY_CARDS).forEach(id => document.getElementById(id).style.display = 'none');
   document.getElementById('wayStationCard').style.display = 'none';
   document.getElementById('wayDoneRow').style.display = 'none';
+  document.getElementById('wayBrowserModeNote').style.display = isStandaloneApp() ? 'none' : '';
+  const showUnsent = hasUnsentEntries();
+  document.getElementById('wayNotNowLink').style.display = showUnsent ? '' : 'none';
+  document.getElementById('wayOfflineSendUnsentLink').style.display = showUnsent ? '' : 'none';
   if (wayMode === 'ready') {
     document.getElementById('wayStationCard').style.display = '';
     document.getElementById('wayDoneRow').style.display = 'flex';
@@ -7440,6 +7646,16 @@ function renderWhoAreYou() {
   } else if (wayMode === 'denied') {
     document.getElementById('wayDeniedMessageEl').textContent = wayDeniedMessage;
   }
+}
+// The sign-in gate: called once at init, before the user ever sees the
+// main page, Setup QR, or lead mode — never from anywhere else (compare
+// showWhoAreYouScreen(), used by every OTHER entry point, where being
+// already signed in correctly shows the station-picker "ready" screen
+// instead of doing nothing). A no-op if already signed in, so a device
+// with a restored session never sees any of this.
+function maybeShowSignInGate() {
+  if (accountSession) return;
+  showWhoAreYouScreen();
 }
 function showWhoAreYouScreen() {
   // The scanner must be fully closed (camera stopped, overlay hidden)
@@ -7480,20 +7696,25 @@ document.querySelectorAll('.pw-toggle').forEach(btn => {
     btn.textContent = show ? 'Hide' : 'Show';
   });
 });
-document.getElementById('wayGoSignupLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signup'; renderWhoAreYou(); });
+document.getElementById('wayGoSignupBtn').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signup'; renderWhoAreYou(); });
 document.getElementById('wayGoSignInLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signin'; renderWhoAreYou(); });
 document.getElementById('wayGoForgotLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'forgot'; renderWhoAreYou(); });
 document.getElementById('wayForgotBackLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signin'; renderWhoAreYou(); });
 document.getElementById('wayForgotGoResetLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'resetpw'; renderWhoAreYou(); });
 document.getElementById('wayResetPwBackLink').addEventListener('click', (e) => { e.preventDefault(); wayMode = 'signin'; renderWhoAreYou(); });
 document.getElementById('wayDeniedBackBtn').addEventListener('click', () => { wayMode = 'signin'; renderWhoAreYou(); });
-// Sign-in mode is the one place this overlay can get re-triggered by
-// something OTHER than the user's own choice (the session-watcher signing
-// them out after a deactivation/second-device sign-in) — "blocks new
-// scouting" was never meant to also block reaching Send my data / Reset
-// this device on a device that already has unsent entries sitting on it,
-// so this just closes the overlay without requiring a sign-in first.
-document.getElementById('wayNotNowLink').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('whoAreYouOverlay').style.display = 'none'; });
+// The gate's ONE bypass: a device with unsent entries must always be able
+// to get them off the device, signed in or not — goes straight to the
+// Send QR for exactly those entries rather than just closing the gate and
+// leaving the student to find it themselves. Hidden entirely (see
+// renderWhoAreYou()) when there's nothing unsent, so it's never a general
+// "skip sign-in" escape.
+async function sendUnsentDataFromGate() {
+  document.getElementById('whoAreYouOverlay').style.display = 'none';
+  await openQrForEntries(matches.filter(m => !m.sent), pits.filter(p => !p.sent));
+}
+document.getElementById('wayNotNowLink').addEventListener('click', (e) => { e.preventDefault(); sendUnsentDataFromGate(); });
+document.getElementById('wayOfflineSendUnsentLink').addEventListener('click', (e) => { e.preventDefault(); sendUnsentDataFromGate(); });
 
 document.getElementById('waySignInBtn').addEventListener('click', async () => {
   const username = document.getElementById('waySignInUsername').value.trim();
@@ -7553,7 +7774,10 @@ document.getElementById('wayResetPwSubmitBtn').addEventListener('click', async (
   if (!result.ok) { hint.textContent = result.error; return; }
   const scouterDoc = await window.FB.getScouterDoc(result.scouterId);
   const sessionId = genShortId();
-  await window.FB.updateScouterSelf(result.scouterId, { sessionId, deviceId, sessionChangedAt: new Date().toISOString(), lastSignInAt: new Date().toISOString() });
+  // completeReset()'s own batch already cleared sessionActive to false
+  // (see firestore.rules/completeReset()) specifically so this always
+  // succeeds — a reset is often exactly "I lost/can't use my old device."
+  await window.FB.startSession(result.scouterId, { sessionId, sessionMode: currentSessionMode(), deviceId });
   beginAccountSession({ scouterId: result.scouterId, uid: result.uid, sessionId, name: scouterDoc.name, username: scouterDoc.username, role: scouterDoc.role, isOwner: scouterDoc.isOwner });
   wayMode = 'ready';
   renderWhoAreYou();
@@ -11691,8 +11915,19 @@ async function runSelfTests() {
   maybeShowAddToHomeScreenTip();
   const isTestRun = new URLSearchParams(location.search).get('test') === '1';
   if (!isTestRun) {
+    maybeShowSignInGate();
     retryPendingNotifications();
     setInterval(retryPendingNotifications, 5 * 60 * 1000);
+    retryPendingSessionEnd();
+    // Browser-mode liveness ping — installed sessions never expire, so
+    // never need this (and the function itself is a no-op for them, via
+    // currentSessionMode()). A closed/crashed tab just stops heartbeating,
+    // freeing the account ~3 minutes later with no action from anyone.
+    setInterval(() => {
+      if (accountSession && currentSessionMode() === 'browser' && navigator.onLine) {
+        window.FB.heartbeatSession(accountSession.scouterId).catch(() => {});
+      }
+    }, 60 * 1000);
     handleReviewDeepLink();
   }
   if (!isTestRun && eventData.eventCode) {
