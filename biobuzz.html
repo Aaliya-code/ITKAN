@@ -11435,6 +11435,18 @@ async function runSelfTests() {
         record('Notifier: a failed/offline send is queued, then successfully retried once back online', pass, { queuedAfterFailure, calls, pendingAfterRetry: pendingNotifications.length });
       } catch (err) { record('Notifier: a failed/offline send is queued, then successfully retried once back online', false, err.message); }
       finally { notifierRestore(); }
+
+      // The ambient guard installed just above (before runSelfTests()) must
+      // catch a real-mailer-host URL even with NO per-test fetch override
+      // active — this is what actually protects a self-test run against
+      // the real deployed URL, not the mock.test one the tests above use.
+      try {
+        SIGNUP_NOTIFIER_URL = 'https://script.google.com/macros/s/FAKE_DEPLOYMENT_ID/exec';
+        const res = await sendOneNotification({ name: 'Guard Test', username: 'guardtest', scouterId: 'sc_guard' });
+        const pass = res === true; // sendOneNotification returns res.ok, and the ambient mock's body is {ok:true,mocked:true}
+        record('Notifier: the ambient ?test=1 guard, not a per-test override, catches a real mailer-host URL', pass, { res });
+      } catch (err) { record('Notifier: the ambient ?test=1 guard, not a per-test override, catches a real mailer-host URL', false, err.message); }
+      finally { notifierRestore(); }
     }
 
     // #review=<scouterId> deep link: signed in as an active lead jumps
@@ -11688,6 +11700,22 @@ async function runSelfTests() {
     setInterval(() => { if (eventData.eventCode) fetchEventData(true); }, 5 * 60 * 1000);
   }
   if (isTestRun) {
+    // Ambient safety net for the whole ?test=1 run: ANY fetch to the real
+    // Apps Script mailer host is auto-mocked, not just inside the 3
+    // notifier tests that already mock it themselves for their own
+    // assertions. Those tests capture/restore window.fetch around THIS
+    // wrapper (not the raw native fetch), so it stays the fallback for
+    // every other line of self-test code, now and for anything added
+    // later — a real network call to that host must never happen just
+    // because ?test=1 is also reachable on the live, fully-configured site.
+    const realFetchForTests = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, mocked: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return realFetchForTests(input, init);
+    };
     await runSelfTests();
   }
 })();
