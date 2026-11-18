@@ -5573,7 +5573,7 @@ function rosterCacheUpsert(data) {
 // wait on this; a failed/offline send just queues for the next retry,
 // which happens on 'online' and on the same periodic timer that already
 // silently refreshes FTCScout data.
-let SIGNUP_NOTIFIER_URL = 'https://script.google.com/macros/s/AKfycbwcUKvJZsKjmXWRh0NoV_S9yuV3N3kR8LTvrbF9jr2oqAD2WyUYydv0HBDE3kQLyBnFng/exec'; // let, not const — ?test=1 temporarily overrides this to exercise the real send/retry path without a real network call
+let SIGNUP_NOTIFIER_URL = 'https://script.google.com/macros/s/AKfycbxx17jTH1XhYz2J3pOlV7Z4sbXPmNwQtHKpIlPoqIiCEIwXmEVGFtw_taNzCrFPKfnwiQ/exec'; // let, not const — ?test=1 temporarily overrides this to exercise the real send/retry path without a real network call
 const LS_PENDING_NOTIFICATIONS = 'biobuzz2026_pendingNotifications';
 function loadPendingNotifications() {
   try { const v = JSON.parse(localStorage.getItem(LS_PENDING_NOTIFICATIONS)); if (Array.isArray(v)) return v; } catch (e) {}
