@@ -408,6 +408,18 @@
   }
   .draft-banner .db-discard { background: rgba(22,24,31,.2); color: #16181f; }
 
+  /* ── PENDING SIGN-UPS BANNER (lead-only) ── */
+  .pending-signups-banner {
+    display: none;
+    background: var(--blue); color: #fff; font-size: 13px; font-weight: 700;
+    padding: 10px 14px; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    cursor: pointer;
+  }
+  .pending-signups-banner .psb-dismiss {
+    border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer;
+    background: rgba(255,255,255,.2); color: #fff;
+  }
+
   /* ── DUPLICATE FLAG ── */
   .dup-flag { color: var(--yellow); font-size: 13px; margin-left: 4px; cursor: help; }
 
@@ -903,6 +915,11 @@
   <div class="db-actions">
     <button class="db-discard" id="draftDiscardBtn">Discard</button>
   </div>
+</div>
+
+<div class="pending-signups-banner" id="pendingSignupsBanner">
+  <span id="pendingSignupsBannerText"></span>
+  <button class="psb-dismiss" id="pendingSignupsDismissBtn">Dismiss</button>
 </div>
 
 <header>
@@ -5679,6 +5696,25 @@ async function highlightScouterRowWhenReady(scouterId, attemptsLeft) {
   await highlightScouterRowWhenReady(scouterId, attemptsLeft - 1);
 }
 window.addEventListener('hashchange', () => { if (parseReviewHash()) handleReviewDeepLink(); });
+// Chromium-only (Chrome/Edge desktop + Android; no Firefox/Safari, so
+// never relied on for iPhone/iPad) — launch_handler: client_mode:
+// "focus-existing" in the manifest means re-launching the ALREADY-OPEN
+// installed app (e.g. tapping the email link again) brings the existing
+// window to the front WITHOUT navigating it, delivering the target URL
+// here instead. Without this, that second launch would just silently do
+// nothing with the #review= hash since the app was already running.
+if (window.launchQueue) {
+  window.launchQueue.setConsumer((launchParams) => {
+    if (!launchParams || !launchParams.targetURL) return;
+    let hash = '';
+    try { hash = new URL(launchParams.targetURL).hash; } catch (e) {}
+    const m = hash.match(/^#review=(.+)$/);
+    if (!m) return;
+    try { history.replaceState(null, '', location.pathname + location.search + hash); } catch (e) {}
+    pendingReviewScouterId = decodeURIComponent(m[1]);
+    handleReviewDeepLink();
+  });
+}
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 function normUsername(u) { return (u || '').trim().toLowerCase(); }
@@ -5692,7 +5728,11 @@ function beginAccountSession({ scouterId, uid, sessionId, name, username, role, 
   // particular, gets PERMISSION_DENIED from the rules, and onSnapshot's
   // silent error callback means it just dies with no retry. Restart it
   // now that there's an actual signed-in lead account to listen as.
-  if (deviceRole === 'lead' && role === 'lead') { stopScoutersLiveSync(); startScoutersLiveSync(); }
+  // Gated on the ACCOUNT's role only, not deviceRole — a lead account
+  // signed in through the universal gate needs the pending-signups
+  // banner/badge working immediately, even on a device that's still in
+  // Scouter deviceRole (never PIN-unlocked into Lead mode locally).
+  if (role === 'lead') { stopScoutersLiveSync(); startScoutersLiveSync(); }
   persistedScouter = name;
   try { localStorage.setItem(LS_SCOUTER, persistedScouter); } catch (e) {}
   document.getElementById('s-scouterName').value = persistedScouter;
@@ -6135,9 +6175,14 @@ function applyRoleUI() {
   }
   // The Scouters live listener runs for the WHOLE lead session (not just
   // while that screen is open), so rosterCache stays maximally fresh for
-  // offline use at the event — stopped the instant the device isn't lead
-  // anymore so a scouter device never holds an open lead-only listener.
-  if (isLead) startScoutersLiveSync(); else stopScoutersLiveSync();
+  // offline use at the event, AND the pending-signups banner keeps
+  // working — stopped only once NEITHER the device NOR the signed-in
+  // account is lead, so a scouter device never holds an open lead-only
+  // listener, but switching deviceRole back to Scouter while still
+  // signed in as a lead account (a purely local UI toggle) doesn't kill
+  // it out from under that still-active lead session.
+  const accountIsLead = !!(accountSession && accountSession.role === 'lead');
+  if (isLead || accountIsLead) startScoutersLiveSync(); else stopScoutersLiveSync();
 }
 function openRoleGate() {
   vib();
@@ -7239,6 +7284,7 @@ function startScoutersLiveSync() {
       if (!fromCache) { accounts.forEach(rosterCacheUpsert); rosterCache.fetchedAt = new Date().toISOString(); saveRosterCache(); }
       renderScoutersScreenIfOpen();
       renderScoutersPendingBadge();
+      renderPendingSignupsBanner();
     });
     _resetReqUnsub = window.FB.watchResetRequests((reqs) => {
       _latestResetRequests = reqs;
@@ -7251,6 +7297,7 @@ function stopScoutersLiveSync() {
   if (_scoutersUnsub) { _scoutersUnsub(); _scoutersUnsub = null; }
   if (_resetReqUnsub) { _resetReqUnsub(); _resetReqUnsub = null; }
   renderScoutersPendingBadge();
+  renderPendingSignupsBanner();
 }
 // Visible on the Export page's own "Scouters" button, not just inside the
 // overlay's own Pending count — a lead glancing at the page should see
@@ -7261,6 +7308,64 @@ function renderScoutersPendingBadge() {
   badge.textContent = n;
   badge.style.display = n > 0 ? '' : 'none';
 }
+// ══════════ Pending sign-ups banner (lead-only, every page) ══════════
+// "Dismissible, reappears for a new sign-up" means dismissal has to be
+// keyed to WHICH pending accounts were dismissed, not a one-time flag —
+// otherwise it could never tell "still nothing new" apart from "a
+// genuinely new signup arrived after I dismissed the old one(s)".
+const LS_DISMISSED_PENDING_SIGNUPS = 'biobuzz2026_dismissedPendingSignups';
+function loadDismissedPendingSignups() {
+  try { const v = JSON.parse(localStorage.getItem(LS_DISMISSED_PENDING_SIGNUPS)); if (Array.isArray(v)) return v; } catch (e) {}
+  return [];
+}
+let dismissedPendingSignups = loadDismissedPendingSignups();
+function saveDismissedPendingSignups() { try { localStorage.setItem(LS_DISMISSED_PENDING_SIGNUPS, JSON.stringify(dismissedPendingSignups)); } catch (e) {} }
+function currentUndismissedPendingSignups() {
+  // Prune dismissed ids that aren't even pending anymore (approved/
+  // denied since) so this never grows without bound.
+  const pendingIds = new Set(_latestScouters.filter(a => a.status === 'pending').map(a => a.id));
+  const pruned = dismissedPendingSignups.filter(id => pendingIds.has(id));
+  if (pruned.length !== dismissedPendingSignups.length) { dismissedPendingSignups = pruned; saveDismissedPendingSignups(); }
+  return _latestScouters.filter(a => a.status === 'pending' && !dismissedPendingSignups.includes(a.id));
+}
+// Called from the live roster snapshot (covers "opens the app" — the
+// first snapshot after sign-in) AND explicitly on visibilitychange/online
+// below (covers "returns to it" / "reconnects" even when the snapshot
+// itself hasn't changed) — never shows for a scouter, only an active lead.
+// Gated on the signed-in ACCOUNT's role only, not deviceRole/PIN state —
+// unlike isSignedInAsLead() (used by the #review deep link, which
+// navigates through lead-only nav), this must work for a lead account
+// signed in via the universal gate on a device still in Scouter
+// deviceRole, never PIN-unlocked.
+function renderPendingSignupsBanner() {
+  const banner = document.getElementById('pendingSignupsBanner');
+  const accountIsLead = !!(accountSession && accountSession.role === 'lead');
+  if (!accountIsLead || !_scoutersSyncWanted) { banner.style.display = 'none'; return; }
+  const pending = currentUndismissedPendingSignups();
+  if (!pending.length) { banner.style.display = 'none'; return; }
+  document.getElementById('pendingSignupsBannerText').textContent = `${pending.length} new sign-up${pending.length === 1 ? '' : 's'} — Review`;
+  banner.style.display = 'flex';
+}
+function reviewNewestPendingSignup() {
+  const pending = _latestScouters.filter(a => a.status === 'pending');
+  if (!pending.length) return;
+  const newest = pending.slice().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))[0];
+  document.querySelector('nav button[data-page="export"]').click();
+  document.getElementById('openScoutersBtn').click();
+  highlightScouterRowWhenReady(newest.id);
+}
+document.getElementById('pendingSignupsBanner').addEventListener('click', (e) => {
+  if (e.target.closest('#pendingSignupsDismissBtn')) return;
+  reviewNewestPendingSignup();
+});
+document.getElementById('pendingSignupsDismissBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  _latestScouters.filter(a => a.status === 'pending').forEach(a => { if (!dismissedPendingSignups.includes(a.id)) dismissedPendingSignups.push(a.id); });
+  saveDismissedPendingSignups();
+  renderPendingSignupsBanner();
+});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') renderPendingSignupsBanner(); });
+window.addEventListener('online', renderPendingSignupsBanner);
 function scouterEntriesCountAndLastSync(scouterId) {
   const mine = [...matches, ...pits].filter(e => e.scouterId === scouterId);
   const lastSync = mine.map(e => e.updatedAt || e.ts || '').sort().pop() || null;
@@ -11916,6 +12021,7 @@ async function runSelfTests() {
   const isTestRun = new URLSearchParams(location.search).get('test') === '1';
   if (!isTestRun) {
     maybeShowSignInGate();
+    renderPendingSignupsBanner(); // a restored lead session may already have a live snapshot (rosterCache-backed) by now
     retryPendingNotifications();
     setInterval(retryPendingNotifications, 5 * 60 * 1000);
     retryPendingSessionEnd();
