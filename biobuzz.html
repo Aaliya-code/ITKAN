@@ -196,7 +196,7 @@
   label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
   .field { margin-bottom: 14px; }
   .field:last-child { margin-bottom: 0; }
-  input[type="text"], input[type="number"], textarea, select {
+  input[type="text"], input[type="number"], input[type="password"], textarea, select {
     width: 100%;
     background: var(--surface2);
     border: 1px solid var(--border);
@@ -342,6 +342,7 @@
   .toast.show { opacity: 1; }
 
   .hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.4; }
+  .hint a { color: var(--blue); font-weight: 700; text-decoration: underline; }
   h2.section-title { font-size: 14px; font-weight: 700; margin: 18px 0 8px; color: var(--yellow); }
   h2.section-title:first-child { margin-top: 0; }
 
@@ -1253,6 +1254,10 @@
         <option value="all">All Events</option>
       </select>
     </div>
+    <div class="toggle-row" id="untaggedEntriesBanner" style="display:none;margin-bottom:12px;background:var(--surface);border:1px solid var(--yellow);border-radius:var(--radius);padding:12px 14px;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+      <div><span class="tname" id="untaggedEntriesText"></span><span class="tpoints">often from an older QR transfer that didn't carry an event tag</span></div>
+      <button class="btn btn-primary btn-sm" id="assignUntaggedBtn">Assign to current event</button>
+    </div>
     <div class="toggle-row" style="margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;">
       <div><span class="tname">Include Practice Matches</span><span class="tpoints">excluded from averages/rankings by default</span></div>
       <div class="switch" id="includePracticeToggle"></div>
@@ -1601,7 +1606,7 @@
 
 <div class="review-overlay" id="whoAreYouOverlay" style="display:none;">
   <div class="team-banner-slot"></div>
-  <h2 class="section-title">Who are you?</h2>
+  <h2 class="section-title" id="whoAreYouTitle">Who are you?</h2>
   <div class="hint" id="wayBrowserModeNote" style="display:none;text-align:center;margin-bottom:10px;">Using the installed app? Sign in there first — signing in here only works if you're not already signed in anywhere else.</div>
   <!-- A device that's never been signed in AND has no internet right now
        — sign-up/sign-in both need a real Firebase round trip. -->
@@ -1621,7 +1626,7 @@
       <label>Password</label>
       <div class="pw-row">
         <input type="password" id="waySignInPassword" placeholder="Your password" autocomplete="current-password" enterkeyhint="done" />
-        <button type="button" class="pw-toggle" data-pw-toggle-for="waySignInPassword">Show</button>
+        <button type="button" class="btn btn-secondary btn-sm pw-toggle" data-pw-toggle-for="waySignInPassword">Show</button>
       </div>
     </div>
     <div class="hint" id="waySignInHint"></div>
@@ -1644,14 +1649,14 @@
       <label>Password</label>
       <div class="pw-row">
         <input type="password" id="waySignUpPassword" placeholder="At least 8 characters" autocomplete="new-password" enterkeyhint="next" />
-        <button type="button" class="pw-toggle" data-pw-toggle-for="waySignUpPassword">Show</button>
+        <button type="button" class="btn btn-secondary btn-sm pw-toggle" data-pw-toggle-for="waySignUpPassword">Show</button>
       </div>
     </div>
     <div class="field">
       <label>Confirm Password</label>
       <div class="pw-row">
         <input type="password" id="waySignUpPassword2" placeholder="Retype password" autocomplete="new-password" enterkeyhint="done" />
-        <button type="button" class="pw-toggle" data-pw-toggle-for="waySignUpPassword2">Show</button>
+        <button type="button" class="btn btn-secondary btn-sm pw-toggle" data-pw-toggle-for="waySignUpPassword2">Show</button>
       </div>
     </div>
     <div class="hint" id="waySignUpHint"></div>
@@ -1684,7 +1689,7 @@
       <label>New Password</label>
       <div class="pw-row">
         <input type="password" id="wayResetPwPassword" placeholder="At least 8 characters" autocomplete="new-password" enterkeyhint="done" />
-        <button type="button" class="pw-toggle" data-pw-toggle-for="wayResetPwPassword">Show</button>
+        <button type="button" class="btn btn-secondary btn-sm pw-toggle" data-pw-toggle-for="wayResetPwPassword">Show</button>
       </div>
     </div>
     <div class="hint" id="wayResetPwHint"></div>
@@ -1750,7 +1755,8 @@
   </div>
   <div class="card" id="resetBlockedCard" style="display:none;text-align:center;">
     <div class="hint" id="resetBlockedHint"></div>
-    <button class="btn btn-primary" id="resetBlockedSendBtn">Send my data (QR)</button>
+    <button class="btn btn-primary" id="resetBlockedSendBtn" style="width:100%;margin-top:8px;">Send my data (QR)</button>
+    <button class="btn btn-secondary" id="resetBlockedCancelBtn" style="width:100%;margin-top:8px;">Cancel</button>
   </div>
   <div class="review-actions" id="resetConfirmActions">
     <button class="btn btn-secondary" id="resetConfirmCancelBtn">Cancel</button>
@@ -2682,6 +2688,27 @@ function renderViewEventFilterLabel() {
   const label = eventData.eventCode ? (eventData.eventName || eventData.eventCode) : 'Unassigned';
   opt.textContent = `Current Event (${label})`;
 }
+// One-tap fix for entries that arrived with no event tag (the classic
+// case: a QR-received entry from before eventCode/season rode along in
+// the transfer — see QR_KEY_MAP/PIT_KEY_MAP) — only offered when this
+// device actually HAS a current event to assign them to.
+function untaggedEntries() { return [...matches, ...pits].filter(e => !e.eventCode); }
+function renderUntaggedEntriesBanner() {
+  const banner = document.getElementById('untaggedEntriesBanner');
+  const n = eventData.eventCode ? untaggedEntries().length : 0;
+  if (!n) { banner.style.display = 'none'; return; }
+  const label = eventData.eventName || eventData.eventCode;
+  document.getElementById('untaggedEntriesText').textContent = `Assign ${n} untagged ${n === 1 ? 'entry' : 'entries'} to ${label}`;
+  banner.style.display = 'flex';
+}
+document.getElementById('assignUntaggedBtn').addEventListener('click', () => {
+  const n = untaggedEntries().length;
+  untaggedEntries().forEach(stampCurrentEvent);
+  save(LS_MATCHES, matches);
+  save(LS_PIT, pits);
+  showToast(`${n} ${n === 1 ? 'entry' : 'entries'} assigned to ${eventData.eventName || eventData.eventCode}`);
+  renderData();
+});
 
 /* ══════════ NAV ══════════ */
 document.querySelectorAll('nav button').forEach(btn => {
@@ -3032,6 +3059,13 @@ async function performActualSave() {
       next = matches.map(m => String(m.id) === String(editingId) ? savedEntry : m);
     } else {
       savedEntry = { ...draft, legacy: false, autoPathId, schemaVersion: 9, id: newEntryId(), ts: now, updatedAt: now, sent: false,
+        // A NEW entry's name always comes from the signed-in account at
+        // the moment it's actually saved, not whatever draft.scouter
+        // happens to hold — belt-and-suspenders on top of
+        // beginAccountSession()'s draft carry-over, so a stale/blank
+        // draft name (a race, or a Switch Scouter the carry-over somehow
+        // missed) can never make it into a saved entry.
+        scouter: accountSession ? accountSession.name : draft.scouter,
         scouterId: accountSession ? accountSession.scouterId : '', deviceId: accountSession ? deviceId : '',
         sessionId: accountSession ? accountSession.sessionId : '' };
       next = [...matches, savedEntry];
@@ -3356,7 +3390,9 @@ function wireRoutineToolButtons(eng, root) {
   });
   root.querySelector('.routine-undo-btn').addEventListener('click', eng.undo);
   root.querySelector('.routine-clear-btn').addEventListener('click', eng.clear);
-  root.querySelector('.routine-setstart-btn').addEventListener('click', (e) => {
+  const routineSetStartBtn = root.querySelector('.routine-setstart-btn');
+  eng.setStartButtonEl = routineSetStartBtn;
+  routineSetStartBtn.addEventListener('click', (e) => {
     e.currentTarget.classList.toggle('active', eng.toggleSettingStart());
   });
 }
@@ -3703,12 +3739,18 @@ document.getElementById('savePitBtn').addEventListener('click', async () => {
     const tagScouterId = accountSession ? accountSession.scouterId : '';
     const tagDeviceId = accountSession ? deviceId : '';
     const tagSessionId = accountSession ? accountSession.sessionId : '';
+    // From the signed-in account directly, not persistedScouter — the
+    // two should always agree (setScouterName() keeps them in lockstep),
+    // but stamping straight from the single source of truth at the
+    // moment of save is what actually guarantees a stale/blank name can
+    // never land in a saved entry.
+    const tagScouterName = accountSession ? accountSession.name : persistedScouter;
     if (editingPitId) {
       const old = pits.find(p => String(p.id) === String(editingPitId));
-      entry = { ...pitDraft, schemaVersion: 7, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: persistedScouter, scouterId: tagScouterId, deviceId: tagDeviceId, sessionId: tagSessionId, sent: false };
+      entry = { ...pitDraft, schemaVersion: 7, id: editingPitId, ts: old ? old.ts : now, updatedAt: now, scouter: tagScouterName, scouterId: tagScouterId, deviceId: tagDeviceId, sessionId: tagSessionId, sent: false };
       next = pits.map(p => String(p.id) === String(editingPitId) ? entry : p);
     } else {
-      entry = { ...pitDraft, schemaVersion: 7, id: newEntryId(), ts: now, updatedAt: now, scouter: persistedScouter, scouterId: tagScouterId, deviceId: tagDeviceId, sessionId: tagSessionId, sent: false };
+      entry = { ...pitDraft, schemaVersion: 7, id: newEntryId(), ts: now, updatedAt: now, scouter: tagScouterName, scouterId: tagScouterId, deviceId: tagDeviceId, sessionId: tagSessionId, sent: false };
       next = [...pits, entry];
     }
     const ok = save(LS_PIT, next);
@@ -3751,6 +3793,7 @@ document.getElementById('pitEditingCancelBtn').addEventListener('click', () => {
 /* ══════════ DATA RENDERING ══════════ */
 function renderData() {
   renderViewEventFilterLabel();
+  renderUntaggedEntriesBanner();
   renderRankings();
   renderMatchList();
   renderAverages();
@@ -4935,6 +4978,12 @@ function createDrawSurface(cfg) {
     cfg.setStart(x, y, tileOf(x, y));
     eng.drawField();
     eng.renderWarning();
+    // Turn Set Start off after a placement — otherwise it stayed on
+    // (match surface and pit routines alike), so the NEXT drag just
+    // re-moved the start square instead of drawing a path, with no
+    // visible explanation why nothing was being drawn.
+    eng.settingStart = false;
+    if (eng.setStartButtonEl) eng.setStartButtonEl.classList.remove('active');
     if (cfg.onPlaceStart) cfg.onPlaceStart();
   };
   eng.replayAll = function() {
@@ -5078,7 +5127,9 @@ function initAutoPathCanvas() {
       });
       document.getElementById('path-undo-btn').addEventListener('click', eng.undo);
       document.getElementById('path-clear-btn').addEventListener('click', eng.clear);
-      document.getElementById('set-start-btn').addEventListener('click', (e) => {
+      const setStartBtn = document.getElementById('set-start-btn');
+      eng.setStartButtonEl = setStartBtn;
+      setStartBtn.addEventListener('click', (e) => {
         e.currentTarget.classList.toggle('active', eng.toggleSettingStart());
       });
     },
@@ -5733,10 +5784,12 @@ function beginAccountSession({ scouterId, uid, sessionId, name, username, role, 
   // banner/badge working immediately, even on a device that's still in
   // Scouter deviceRole (never PIN-unlocked into Lead mode locally).
   if (role === 'lead') { stopScoutersLiveSync(); startScoutersLiveSync(); }
-  persistedScouter = name;
-  try { localStorage.setItem(LS_SCOUTER, persistedScouter); } catch (e) {}
-  document.getElementById('s-scouterName').value = persistedScouter;
-  document.getElementById('me-scouterName').value = persistedScouter;
+  // setScouterName() (not a hand-rolled copy of its first few lines, as
+  // this used to be) is what actually carries the new name into
+  // draft.scouter too — the draft is created before sign-in ever
+  // happens, so without this the FIRST match entry after signing in (or
+  // switching scouters) could save with the previous/blank name baked in.
+  setScouterName(name);
   applyScouterNameLockUI();
   renderLeadAccountCard();
   startSessionWatcher();
@@ -5792,6 +5845,21 @@ async function retryPendingSessionEnd() {
   } catch (err) { /* still offline, or someone else already ended it — leave queued */ }
 }
 window.addEventListener('online', retryPendingSessionEnd);
+// Best-effort only — browsers give unload handlers no guarantee an async
+// write actually completes before the page is torn down, so this is
+// purely an optimization on top of the real backstop: the 3-minute
+// heartbeat-staleness fallback in sessionCurrentlyActive() (firestore.rules)
+// frees the account regardless of whether this ever lands. Never queued
+// (unlike a real Sign-out) — if it doesn't land, the heartbeat timeout
+// is what actually guarantees the slot frees up, not a retry here.
+// Installed sessions never expire on their own, so skip this entirely —
+// an installed app being backgrounded is a normal thing that should stay
+// signed in, not a tab closing.
+window.addEventListener('pagehide', () => {
+  if (accountSession && currentSessionMode() === 'browser') {
+    try { window.FB.endSessionSelf(accountSession.scouterId, accountSession.sessionId); } catch (e) {}
+  }
+});
 
 // The live "signed in on another device" AND "deactivated immediately"
 // enforcement are the SAME listener — both are just "does the doc still
@@ -5809,11 +5877,13 @@ function startSessionWatcher() {
     if (!accountSession || accountSession.scouterId !== myScouterId) return;
     if (!doc || doc.status === 'deactivated' || doc.status === 'denied') {
       endAccountSession();
+      showWhoAreYouScreen(); // never leave the device sitting on the main screen signed out
       showToast('You have been signed out (account deactivated).', true);
       return;
     }
     if (doc.sessionId !== mySessionId) {
       endAccountSession();
+      showWhoAreYouScreen();
       showToast('You signed in on another device.', true);
       return;
     }
@@ -5824,7 +5894,26 @@ function startSessionWatcher() {
     // sessionActive without touching sessionId at all.
     if (doc.sessionActive === false) {
       endAccountSession();
+      showWhoAreYouScreen();
       showToast('Your session was ended by your lead.', true);
+      return;
+    }
+    // Live role/isOwner/name sync — a lead promoting/demoting/renaming a
+    // signed-in scouter used to only reach that device at its NEXT
+    // sign-in (accountSession was only ever set once, at sign-in time).
+    // Reuses setScouterName()/start-stop-ScoutersLiveSync() rather than
+    // duplicating what beginAccountSession() already does for each.
+    if (doc.role !== accountSession.role || doc.isOwner !== accountSession.isOwner || doc.name !== accountSession.name) {
+      const wasLead = accountSession.role === 'lead';
+      const becameLead = doc.role === 'lead';
+      accountSession = { ...accountSession, role: doc.role, isOwner: doc.isOwner, name: doc.name };
+      saveAccountSession();
+      setScouterName(doc.name);
+      if (becameLead) { stopScoutersLiveSync(); startScoutersLiveSync(); }
+      else if (wasLead) { stopScoutersLiveSync(); renderScoutersPendingBadge(); renderPendingSignupsBanner(); }
+      renderLeadAccountCard();
+      if (becameLead && !wasLead) showToast("You've been promoted to lead.");
+      else if (!becameLead && wasLead) showToast('Your lead access has been removed.', true);
     }
   });
 }
@@ -7075,6 +7164,7 @@ renderSchedulePreview();
 const QR_KEY_MAP = [
   ['id','i'], ['matchType','mt'], ['matchNumber','mn'], ['teamNumber','tn'], ['alliance','al'],
   ['scouter','sc'], ['scouterId','sid'], ['deviceId','did'], ['sessionId','sid2'], ['ts','ts'], ['updatedAt','u'], ['legacy','lg'], ['schemaVersion','sv'],
+  ['eventCode','ec'], ['season','ssn'],
   ['leave','lv'], ['autoPark','ap'], ['teleopPark','tp'],
   ['startX','sx'], ['startY','sy'], ['startTile','st'],
   ['autoHiveMade','ahm'], ['teleopHiveMade','thm'], ['teleopFlowerMade','tfm'], ['ownGarden','og'],
@@ -7113,6 +7203,7 @@ const PIT_KEY_MAP = [
   ['id','i'], ['teamNumber','tn'], ['teamName','tm'], ['drivetrain','dt'], ['scouter','sc'],
   ['scouterId','sid'], ['deviceId','did'], ['sessionId','sid2'],
   ['ts','ts'], ['updatedAt','u'], ['schemaVersion','sv'],
+  ['eventCode','ec'], ['season','ssn'],
   ['canHive','ch'], ['canFlower','cf'], ['canGarden','cg'], ['canParkLZ','cp'],
   ['intake','ik'], ['routines','rt'],
   ['preferredSide','ps'], ['driverPractice','dp'],
@@ -7709,6 +7800,7 @@ function applySetupPayload(payload) {
 let wayMode = 'signin'; // 'signin' | 'signup' | 'forgot' | 'resetpw' | 'pending' | 'denied' | 'offline-new' | 'ready'
 let wayDeniedMessage = '';
 const WAY_CARDS = { 'signin': 'waySignInCard', 'signup': 'waySignUpCard', 'forgot': 'wayForgotCard', 'resetpw': 'wayResetPwCard', 'pending': 'wayPendingCard', 'denied': 'wayDeniedCard', 'offline-new': 'wayOfflineFirstCard' };
+const WAY_TITLES = { 'signin': 'Sign In', 'signup': 'Create Account', 'forgot': 'Forgot Password', 'resetpw': 'Reset Password', 'pending': 'Pending Approval', 'denied': 'Signup Denied', 'offline-new': 'Sign In', 'ready': 'Who Are You?' };
 // The ONE exception to "no bypassing the sign-in gate" — a device sitting
 // on unsent entries must always have a way to send them, signed in or not.
 function hasUnsentEntries() { return matches.some(m => !m.sent) || pits.some(p => !p.sent); }
@@ -7716,6 +7808,7 @@ function renderWhoAreYou() {
   Object.values(WAY_CARDS).forEach(id => document.getElementById(id).style.display = 'none');
   document.getElementById('wayStationCard').style.display = 'none';
   document.getElementById('wayDoneRow').style.display = 'none';
+  document.getElementById('whoAreYouTitle').textContent = WAY_TITLES[wayMode] || 'Who Are You?';
   document.getElementById('wayBrowserModeNote').style.display = isStandaloneApp() ? 'none' : '';
   const showUnsent = hasUnsentEntries();
   document.getElementById('wayNotNowLink').style.display = showUnsent ? '' : 'none';
@@ -7986,6 +8079,10 @@ document.getElementById('meSelfResetLink').addEventListener('click', (e) => {
   startSelfReset();
 });
 document.getElementById('resetConfirmCancelBtn').addEventListener('click', () => {
+  document.getElementById('resetConfirmOverlay').style.display = 'none';
+  pendingResetId = null;
+});
+document.getElementById('resetBlockedCancelBtn').addEventListener('click', () => {
   document.getElementById('resetConfirmOverlay').style.display = 'none';
   pendingResetId = null;
 });
@@ -10100,10 +10197,14 @@ async function runSelfTests() {
       record('Pointer mapping round-trips within 0.5in regardless of DPR (1/2/3)', allGood, JSON.stringify({ DPR_current: DPR, sampleCount: details.length, allGood }));
     } catch (err) { record('Pointer mapping round-trips within 0.5in regardless of DPR (1/2/3)', false, err.message); }
 
-    // Settings: changing the scouter name mid-draft applies to the current
-    // draft (since its scouter is still blank) and the saved entry carries it.
+    // Settings: changing the scouter name mid-draft (NO account signed
+    // in — a lead using the form directly, the only real scenario where
+    // the name field is actually editable) applies to the current draft
+    // and the saved entry carries it.
     try {
-      const savedPersisted = persistedScouter;
+      const savedPersisted = persistedScouter, savedAccountSession = accountSession, savedDeviceRole = deviceRole;
+      accountSession = null; // the name field is disabled whenever signed in — this scenario only exists signed out
+      deviceRole = 'lead'; // performActualSave()'s guard allows a lead device to save without an account
       draft.matchType = 'Qualification'; draft.matchNumber = '999'; draft.teamNumber = '9999'; draft.alliance = 'red'; draft.scouter = '';
       const nameField = document.getElementById('s-scouterName');
       nameField.value = 'CT Tester';
@@ -10121,7 +10222,29 @@ async function runSelfTests() {
       persistedScouter = savedPersisted;
       try { localStorage.setItem(LS_SCOUTER, persistedScouter); } catch (e) {}
       nameField.value = persistedScouter;
+      accountSession = savedAccountSession;
+      deviceRole = savedDeviceRole;
     } catch (err) { record('Settings: scouter name change mid-draft applies to draft and saved entry', false, err.message); }
+
+    // Regression (bug: first entry after signing in had an empty/stale
+    // name): a NEW match entry's scouter ALWAYS comes from the signed-in
+    // account at save time, never from draft.scouter — even if draft.scouter
+    // somehow still held something else (a stale value, or this exact
+    // field being force-set despite being disabled while signed in).
+    try {
+      const savedAccountSession = accountSession;
+      accountSession = { scouterId: 'ct_namestamp', uid: 'u1', sessionId: 's1', name: 'Account Name Wins', username: 'namestamp', role: 'scouter', isOwner: false };
+      draft.matchType = 'Qualification'; draft.matchNumber = '998'; draft.teamNumber = '9998'; draft.alliance = 'red'; draft.scouter = 'Stale Draft Name';
+      await performActualSave();
+      const saved = matches.find(m => m.matchType === 'Qualification' && m.matchNumber === '998' && m.teamNumber === '9998');
+      const pass = !!saved && saved.scouter === 'Account Name Wins';
+      record('Regression: a NEW entry always stamps the signed-in account\'s name at save time, never a stale draft.scouter', pass, JSON.stringify({ savedScouter: saved && saved.scouter }));
+      if (saved) {
+        if (saved.autoPathId) { try { await idbDeleteImage(saved.autoPathId); imgCache.delete(saved.autoPathId); } catch (e) {} }
+        matches = matches.filter(m => m.id !== saved.id);
+      }
+      accountSession = savedAccountSession;
+    } catch (err) { record('Regression: a NEW entry always stamps the signed-in account\'s name at save time, never a stale draft.scouter', false, err.message); }
 
     // Settings: changing station re-runs auto-fill for a draft whose match
     // fields were themselves schedule-sourced, and leaves a hand-typed draft alone.
@@ -11345,10 +11468,20 @@ async function runSelfTests() {
       eng.toggleSettingStart();
       eng.placeStartAt(20, 40);
       const startSet = pitDraft.routines[0].startX !== null && pitDraft.routines[0].startTile !== '';
+      // Regression: Set Start used to stay ON after a placement, so the
+      // very next drag just re-moved the start square instead of drawing
+      // — placeStartAt() now turns it off automatically.
+      const settingStartAutoOff = eng.settingStart === false && !eng.setStartButtonEl.classList.contains('active');
+      // ...and confirms a drag right after placing the start draws a
+      // stroke again instead of moving the start square a second time.
+      cv.dispatchEvent(new MouseEvent('mousedown', { clientX: rect.left + 25, clientY: rect.top + 25, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mousemove', { clientX: rect.left + 65, clientY: rect.top + 65, bubbles: true }));
+      cv.dispatchEvent(new MouseEvent('mouseup', { clientX: rect.left + 65, clientY: rect.top + 65, bubbles: true }));
+      const drawsAfterSetStart = pitDraft.routines[0].strokes.length === 1;
 
-      const pass = engineReady && strokesAfterDraw === 1 && strokesAfterUndo === 0 && strokesAfterClear === 0 && startSet;
-      record('Pit routine: draw/undo/clear/set-start all work through the shared drawing engine', pass,
-        JSON.stringify({ engineReady, strokesAfterDraw, strokesAfterUndo, strokesAfterClear, startSet, startTile: pitDraft.routines[0].startTile }));
+      const pass = engineReady && strokesAfterDraw === 1 && strokesAfterUndo === 0 && strokesAfterClear === 0 && startSet && settingStartAutoOff && drawsAfterSetStart;
+      record('Pit routine: draw/undo/clear/set-start all work through the shared drawing engine, and Set Start turns off automatically after placement', pass,
+        JSON.stringify({ engineReady, strokesAfterDraw, strokesAfterUndo, strokesAfterClear, startSet, settingStartAutoOff, drawsAfterSetStart, startTile: pitDraft.routines[0].startTile }));
 
       pitDraft = savedPitDraft;
       renderPitRoutines();
@@ -11833,6 +11966,45 @@ async function runSelfTests() {
         record('Review deep link: an unknown/already-handled id shows a clear message, not a silent hang', pass, { toastMsg });
       } catch (err) { record('Review deep link: an unknown/already-handled id shows a clear message, not a silent hang', false, err.message); }
       finally { reviewRestore(); }
+    }
+
+    // Sign-in screen polish regression: the password field + its Show
+    // button used to fall back to unstyled browser defaults (input[type=
+    // password] was missing from the base input selector; the toggle
+    // button had no .btn class at all), "Forgot password?" was the same
+    // dim, unreadable color as plain hint text, and the overlay's title
+    // never changed from the generic "Who are you?" no matter the mode.
+    {
+      const savedWayMode = wayMode;
+      try {
+        wayMode = 'signin';
+        renderWhoAreYou();
+        const pwField = document.getElementById('waySignInPassword');
+        const userField = document.getElementById('waySignInUsername');
+        const toggleBtn = document.querySelector('[data-pw-toggle-for="waySignInPassword"]');
+        const forgotLink = document.getElementById('wayGoForgotLink');
+        const pwStyle = getComputedStyle(pwField), userStyle = getComputedStyle(userField), forgotStyle = getComputedStyle(forgotLink);
+        const pwStyledLikeOtherInputs = pwStyle.backgroundColor === userStyle.backgroundColor && pwStyle.borderStyle === userStyle.borderStyle;
+        const toggleBtnStyled = toggleBtn.classList.contains('btn');
+        // "Readable" isn't pixel-exact-checkable, but it must no longer be
+        // the exact same dim color as a plain (non-link) hint.
+        const dummyHint = document.createElement('div');
+        dummyHint.className = 'hint';
+        dummyHint.style.visibility = 'hidden';
+        document.body.appendChild(dummyHint);
+        const plainHintColor = getComputedStyle(dummyHint).color;
+        document.body.removeChild(dummyHint);
+        const forgotReadable = forgotStyle.color !== plainHintColor;
+        const titleIsSignIn = document.getElementById('whoAreYouTitle').textContent === 'Sign In';
+        const pass = pwStyledLikeOtherInputs && toggleBtnStyled && forgotReadable && titleIsSignIn;
+        record('Sign-in screen: password field + Show button styled like other inputs, "Forgot password?" readable, titled "Sign In"', pass,
+          { pwStyledLikeOtherInputs, toggleBtnStyled, forgotReadable, titleIsSignIn });
+      } catch (err) {
+        record('Sign-in screen: password field + Show button styled like other inputs, "Forgot password?" readable, titled "Sign In"', false, err.message);
+      } finally {
+        wayMode = savedWayMode;
+        renderWhoAreYou();
+      }
     }
 
     // Scouter self-reset (Me sheet link): routes to the blocked screen
