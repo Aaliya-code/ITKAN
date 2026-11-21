@@ -8672,15 +8672,56 @@ function applyAutoFill(fill) {
   renderSetupWarnings();
   saveDraftAutosave();
 }
+// Clears the Setup step's match-identifying fields back to blank, in
+// both the draft and the DOM — shared by maybeAutoFillSetup() and
+// reapplyAutoFillIfTagged() for "there's nothing left to auto-fill into
+// this (possibly stale) draft".
+function clearDraftMatchFields() {
+  draft.matchType = ''; draft.matchNumber = ''; draft.teamNumber = ''; draft.alliance = '';
+  document.querySelectorAll('#matchTypeRow button').forEach(b => b.classList.remove('active'));
+  document.getElementById('f-matchNumber').value = '';
+  document.getElementById('f-teamNumber').value = '';
+  document.querySelectorAll('.alliance-row button').forEach(b => b.classList.remove('active'));
+}
+// True if `draft` has any real scouting progress beyond the schedule-
+// identifying fields (a drawn auto path, a touched stepper/toggle/rating,
+// notes, ...) — compared dynamically against blankDraft() so a future new
+// draft field is covered automatically, no maintenance needed here.
+const DRAFT_IDENTITY_KEYS = new Set(['matchType', 'matchNumber', 'teamNumber', 'alliance', 'scouter', 'eventCode', 'season']);
+function draftHasProgressBeyondIdentity() {
+  const b = blankDraft();
+  return Object.keys(b).some(k => !DRAFT_IDENTITY_KEYS.has(k) && JSON.stringify(draft[k]) !== JSON.stringify(b[k]));
+}
 function maybeAutoFillSetup() {
+  // A draft whose CURRENT match fields are themselves still fully
+  // auto-filled (not hand-edited since — clearAutoFillTag() is what flips
+  // a field's tag off the moment the user touches it) AND has no OTHER
+  // scouting progress yet is safe to re-check against whatever data is
+  // actually loaded right now, instead of being treated as "the user
+  // already filled this in, leave it alone". This is what lets a draft
+  // that got auto-filled before matches/pits had finished loading
+  // (loadMatchesAndPitsFromIDB(), awaited at the very top of init())
+  // self-correct once this runs again later in init() with the real
+  // data, rather than silently keeping the wrong match — while never
+  // touching a draft that's actually IN PROGRESS (an auto path drawn, a
+  // stepper tapped, ...), even if ITS identity came from auto-fill too:
+  // re-picking the match there could silently swap in a different team
+  // while leaving behind scouting data for the old one.
+  const wasFullyAutoFilled = autoFillTags.matchType && autoFillTags.matchNumber && autoFillTags.teamNumber && autoFillTags.alliance && !draftHasProgressBeyondIdentity();
   autoFillTags = { matchType: false, matchNumber: false, teamNumber: false, alliance: false };
-  if (editingId || draft.matchType || draft.matchNumber || draft.teamNumber || draft.alliance) {
+  const hasFields = !!(draft.matchType || draft.matchNumber || draft.teamNumber || draft.alliance);
+  if (editingId || (hasFields && !wasFullyAutoFilled)) {
     renderAutoFillTags();
     renderSetupWarnings();
     return;
   }
   const fill = pickAutoFillMatch();
-  if (!fill) { renderAutoFillTags(); renderSetupWarnings(); return; }
+  if (!fill) {
+    if (hasFields) { clearDraftMatchFields(); saveDraftAutosave(); } // was auto-filled, nothing left to re-fill with — don't leave the stale match showing
+    renderAutoFillTags();
+    renderSetupWarnings();
+    return;
+  }
   applyAutoFill(fill);
 }
 // Re-runs the schedule lookup for the (now-changed) station when the
@@ -8696,11 +8737,7 @@ function reapplyAutoFillIfTagged() {
   if (fill) { applyAutoFill(fill); return; }
   // Nothing left to auto-fill for the new station — clear the stale
   // schedule-sourced fields rather than leave them pointing at the old one.
-  draft.matchType = ''; draft.matchNumber = ''; draft.teamNumber = ''; draft.alliance = '';
-  document.querySelectorAll('#matchTypeRow button').forEach(b => b.classList.remove('active'));
-  document.getElementById('f-matchNumber').value = '';
-  document.getElementById('f-teamNumber').value = '';
-  document.querySelectorAll('.alliance-row button').forEach(b => b.classList.remove('active'));
+  clearDraftMatchFields();
   autoFillTags = { matchType: false, matchNumber: false, teamNumber: false, alliance: false };
   renderAutoFillTags();
   renderSetupWarnings();
@@ -8729,7 +8766,13 @@ function renderSetupWarnings() {
   }
   el.innerHTML = warnings.map(w => `<div class="setup-warning">⚠ ${w}</div>`).join('');
 }
-maybeAutoFillSetup();
+// Deliberately NOT called here at top level. matches/pits are empty
+// until init()'s awaited loadMatchesAndPitsFromIDB() resolves, so an
+// auto-fill run at script-parse time would pick the FIRST scheduled
+// match (nothing recorded yet, as far as it can tell) even when real
+// saved matches already exist — init() itself calls maybeAutoFillSetup()
+// once real data is loaded, which is the only place this may run before
+// a user interaction.
 
 document.querySelectorAll('#pickerSort button').forEach(btn => {
   btn.addEventListener('click', () => {
