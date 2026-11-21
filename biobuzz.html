@@ -1460,6 +1460,7 @@
     <div class="card">
       <div class="card-title">Device Storage</div>
       <div class="hint" id="storageUsage">Checking storage usage…</div>
+      <div class="hint" id="storageWarning" style="display:none;color:var(--yellow);font-weight:700;margin-top:4px;"></div>
       <div class="hint" id="storagePersist">Checking storage persistence…</div>
     </div>
     <div class="card">
@@ -1872,24 +1873,23 @@ function clearSaveError() {
   document.getElementById('saveError').style.display = 'none';
 }
 
-/* ══════════ localStorage (wrapped — every write can fail on quota) ══════════
-   load() flags a parse failure via onFail() so callers (notably the orphan
-   image sweep) can tell "no data" apart from "data failed to parse" — the
-   latter must never be treated as "nothing is referenced". */
+/* ══════════ save() — write-through, now IndexedDB-backed for matches/
+   pits specifically (see MATCHES/PITS STORAGE below, defined later in
+   this script but hoisted — a `function` declaration, same reasoning as
+   every other forward-reference in this file). Any OTHER key still goes
+   to localStorage, unchanged, as a generic fallback (nothing currently
+   uses save() for anything but LS_MATCHES/LS_PIT, but the original
+   function was generic and there's no reason to narrow it).
+   _matchesLoadFailed/_pitsLoadFailed flag a load/parse failure so callers
+   (notably the orphan image sweep) can tell "no data" apart from "data
+   failed to parse" — the latter must never be treated as "nothing is
+   referenced". save() itself is now async — every call site awaits it
+   (see MATCHES/PITS STORAGE for why: a failed write must never be
+   reported as a success, most importantly for an incoming QR receive). */
 let _matchesLoadFailed = false, _pitsLoadFailed = false;
-function load(key, onFail) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw === null) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.error('Failed to parse ' + key, err);
-    if (onFail) onFail();
-    return [];
-  }
-}
-function save(key, data) {
+async function save(key, data) {
+  if (key === LS_MATCHES) return saveMatchesToIDB(data);
+  if (key === LS_PIT) return savePitsToIDB(data);
   try {
     localStorage.setItem(key, JSON.stringify(data));
     return true;
@@ -1900,29 +1900,49 @@ function save(key, data) {
   }
 }
 
-let matches = load(LS_MATCHES, () => { _matchesLoadFailed = true; });
-let pits = load(LS_PIT, () => { _pitsLoadFailed = true; });
+// Populated for real in init() — await loadMatchesAndPitsFromIDB() — same
+// as the previous synchronous top-level localStorage read, just now an
+// awaited step early in the already-async init() sequence instead of
+// something that could happen at script-parse time. Nothing reads these
+// before init() populates them.
+let matches = [];
+let pits = [];
 
-/* ══════════ INDEXEDDB (images AND the event-picker season cache live
-   here, not localStorage — localStorage is small/precious and shared
-   with match/pit data, and the season cache alone can be ~400KB+). ══════════ */
+/* ══════════ INDEXEDDB (images, the event-picker season cache, AND now
+   match/pit entries themselves live here, not localStorage — localStorage
+   caps out around 5MB per site; a season's worth of matches alone can
+   exceed that (measured ~2.6KB/match with a drawn auto path -> ~1,000
+   matches is already half the quota, ~2,000 throws QuotaExceededError).
+   IndexedDB's ceiling is normally a large fraction of free disk space —
+   see requestPersistentStorage()/renderStorageUsage() below for guarding
+   against the browser evicting it and surfacing how full it's getting.
+   The DB is still named "-images" (keeping the existing name rather than
+   a more complex rename-and-migrate for a purely cosmetic improvement),
+   but matches/pits are now real object stores in it, same as images. ══════════ */
 const IDB_NAME = 'biobuzz2026-images';
 const IDB_STORE = 'images';
 const IDB_EVENT_CACHE_STORE = 'event_cache';
+const IDB_MATCHES_STORE = 'matches';
+const IDB_PITS_STORE = 'pits';
 let _idbPromise = null;
 function openImageDB() {
   if (_idbPromise) return _idbPromise;
   _idbPromise = new Promise((resolve, reject) => {
     if (!('indexedDB' in window)) { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(IDB_NAME, 2);
+    const req = indexedDB.open(IDB_NAME, 3);
     // Guarded with contains() rather than switching on event.oldVersion, so
     // this one handler is correct whether it's a brand-new DB (oldVersion 0,
-    // both stores missing) or an existing v1 DB upgrading (only the new
-    // store missing).
+    // every store missing) or an existing v1/v2 DB upgrading (only the new
+    // store(s) missing). matches/pits use keyPath 'id' — one record per
+    // entry, not one giant blob — so a save only ever has to write the
+    // records that actually changed (see idbSyncStore() below), not
+    // re-serialize the whole dataset the way a localStorage blob did.
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
       if (!db.objectStoreNames.contains(IDB_EVENT_CACHE_STORE)) db.createObjectStore(IDB_EVENT_CACHE_STORE);
+      if (!db.objectStoreNames.contains(IDB_MATCHES_STORE)) db.createObjectStore(IDB_MATCHES_STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(IDB_PITS_STORE)) db.createObjectStore(IDB_PITS_STORE, { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -2001,6 +2021,178 @@ function idbClearEventCache() {
     tx.oncomplete = () => resolve(true);
     tx.onerror = () => reject(tx.error);
   }));
+}
+
+/* ══════════ MATCHES/PITS STORAGE (IndexedDB, write-through) ══════════
+   matches/pits stay plain in-memory arrays everywhere else in this file
+   (every existing read site is unchanged) — only how they're PERSISTED
+   changed. save(LS_MATCHES, matches)/save(LS_PIT, pits) keep their exact
+   call signature at every existing call site; save() now returns a
+   Promise (every caller needs `await`), and internally diffs against
+   the last-synced copy so a save only ever writes the records that
+   actually changed. */
+// Used by wipeDeviceCompletely() (Reset this device) to actually empty a
+// store outright, and by self-tests to restore real IndexedDB state
+// without going through the app's normal save path (so fixture data
+// never lingers — see the migration/quota/interrupted-migration tests).
+function idbClearStore(storeName) {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).clear();
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+function idbGetAllMatches() {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const req = db.transaction(IDB_MATCHES_STORE, 'readonly').objectStore(IDB_MATCHES_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  }));
+}
+function idbGetAllPits() {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const req = db.transaction(IDB_PITS_STORE, 'readonly').objectStore(IDB_PITS_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  }));
+}
+// Bulk replace — migration only. Everyday saves go through idbSyncStore()
+// below instead, which writes only what changed.
+function idbPutAll(storeName, arr) {
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    arr.forEach(entry => store.put(entry));
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+// Diffs `arr` against `syncedMap` (id -> the exact object reference last
+// written) and writes ONLY what changed: a new id, or an id whose value
+// is a DIFFERENT reference than what's on record. This works without a
+// deep-equality check because every mutation in this file already
+// rebuilds entries functionally (matches.map(m => cond ? {...m, x} : m))
+// — an entry that didn't change keeps its exact old object reference, so
+// reference inequality reliably means "this one actually changed". An id
+// present in syncedMap but missing from `arr` gets deleted. Returns the
+// new synced map (caller stores it back) so a save that changes nothing
+// (reference-identical array) costs nothing beyond building two Sets.
+// Reference inequality alone would MISS a change if something mutates an
+// entry already in the array IN PLACE instead of replacing it (the
+// schema-migration helpers, and stampCurrentEvent() when used to retag
+// an EXISTING entry, both do — markEntryDirty() is how they opt back in
+// to being written). Cleared from the set once actually synced, so a
+// dirty mark doesn't force a redundant write forever.
+const _dirtyIdbEntries = new WeakSet();
+function markEntryDirty(entry) { _dirtyIdbEntries.add(entry); }
+function idbSyncStore(storeName, arr, syncedMap) {
+  const newIds = new Set();
+  const toPut = [];
+  for (const entry of arr) {
+    newIds.add(entry.id);
+    if (syncedMap.get(entry.id) !== entry || _dirtyIdbEntries.has(entry)) toPut.push(entry);
+  }
+  const toDelete = [];
+  for (const id of syncedMap.keys()) if (!newIds.has(id)) toDelete.push(id);
+  const nextMap = new Map(arr.map(e => [e.id, e]));
+  if (!toPut.length && !toDelete.length) return Promise.resolve(nextMap);
+  return openImageDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    toPut.forEach(entry => store.put(entry));
+    toDelete.forEach(id => store.delete(id));
+    tx.oncomplete = () => resolve(nextMap);
+    tx.onerror = () => reject(tx.error);
+  })).then((result) => {
+    toPut.forEach(entry => _dirtyIdbEntries.delete(entry));
+    return result;
+  });
+}
+let _idbMatchesSynced = new Map();
+let _idbPitsSynced = new Map();
+async function saveMatchesToIDB(arr) {
+  try { _idbMatchesSynced = await idbSyncStore(IDB_MATCHES_STORE, arr, _idbMatchesSynced); return true; }
+  catch (err) { console.error('IndexedDB save failed for matches', err); showSaveError(); return false; }
+}
+async function savePitsToIDB(arr) {
+  try { _idbPitsSynced = await idbSyncStore(IDB_PITS_STORE, arr, _idbPitsSynced); return true; }
+  catch (err) { console.error('IndexedDB save failed for pits', err); showSaveError(); return false; }
+}
+
+const LS_MIGRATED_TO_IDB = 'biobuzz2026_migratedToIDB';
+// One-time, safe migration from the old localStorage blobs. Verified
+// (record counts AND ids both match what IndexedDB reads back) BEFORE
+// the old keys are ever deleted — an interrupted migration (crash,
+// closed tab, a genuine write failure) just leaves localStorage intact
+// and retries from it on the very next load; nothing is ever deleted
+// until the new copy is confirmed to actually be there.
+function _idsMatch(a, b) {
+  if (a.length !== b.length) return false;
+  const bIds = new Set(b.map(x => x.id));
+  return a.every(x => bIds.has(x.id));
+}
+async function migrateMatchesAndPitsToIDB() {
+  let already = false;
+  try { already = localStorage.getItem(LS_MIGRATED_TO_IDB) === '1'; } catch (e) {}
+  if (already) return;
+
+  let oldMatches = [], oldPits = [];
+  try { const raw = localStorage.getItem(LS_MATCHES); if (raw !== null) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) oldMatches = parsed; } }
+  catch (e) { console.error('Failed to parse old matches localStorage during migration', e); }
+  try { const raw = localStorage.getItem(LS_PIT); if (raw !== null) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) oldPits = parsed; } }
+  catch (e) { console.error('Failed to parse old pits localStorage during migration', e); }
+
+  if (!oldMatches.length && !oldPits.length) {
+    // Nothing to migrate (a genuinely fresh device, or a freshly RESET
+    // one). Deliberately does NOT stamp LS_MIGRATED_TO_IDB here — "Reset
+    // this device" sweeps every biobuzz2026_-prefixed key and reloads, and
+    // a reset device must come back looking exactly as fresh as a real
+    // first install (no new key this function wouldn't have left behind
+    // on day one). The cost is re-running this cheap two-key check on
+    // every startup for a device that never has old data to migrate,
+    // which is negligible next to the one-time real migration this guards.
+    return;
+  }
+
+  try {
+    await idbPutAll(IDB_MATCHES_STORE, oldMatches);
+    await idbPutAll(IDB_PITS_STORE, oldPits);
+    const [checkM, checkP] = await Promise.all([idbGetAllMatches(), idbGetAllPits()]);
+    if (_idsMatch(oldMatches, checkM) && _idsMatch(oldPits, checkP)) {
+      localStorage.removeItem(LS_MATCHES);
+      localStorage.removeItem(LS_PIT);
+      localStorage.setItem(LS_MIGRATED_TO_IDB, '1');
+      console.log(`Migrated ${oldMatches.length} matches + ${oldPits.length} pits to IndexedDB`);
+    } else {
+      console.error('IndexedDB migration verification failed — keeping localStorage, will retry next load');
+    }
+  } catch (err) {
+    console.error('IndexedDB migration failed — keeping localStorage, will retry next load', err);
+  }
+}
+// The actual startup load — called once from init(), before anything
+// else touches matches/pits (schema migration, rendering, etc. all
+// assume these are already populated, exactly as they did when this was
+// a synchronous top-level localStorage read).
+async function loadMatchesAndPitsFromIDB() {
+  await migrateMatchesAndPitsToIDB();
+  let m = [], p = [];
+  try { m = await idbGetAllMatches(); } catch (err) { console.error('Failed to load matches from IndexedDB', err); _matchesLoadFailed = true; }
+  try { p = await idbGetAllPits(); } catch (err) { console.error('Failed to load pits from IndexedDB', err); _pitsLoadFailed = true; }
+  // If migration never completed (verification failed, or this load
+  // itself raced a crash) and localStorage still holds the old blob,
+  // prefer THAT over a possibly-partial IndexedDB copy — never silently
+  // prefer the newer, less-trustworthy copy over the one still verified.
+  let migrated = false;
+  try { migrated = localStorage.getItem(LS_MIGRATED_TO_IDB) === '1'; } catch (e) {}
+  if (!migrated) {
+    try { const raw = localStorage.getItem(LS_MATCHES); if (raw !== null) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) m = parsed; } } catch (e) { _matchesLoadFailed = true; }
+    try { const raw = localStorage.getItem(LS_PIT); if (raw !== null) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) p = parsed; } } catch (e) { _pitsLoadFailed = true; }
+  }
+  _idbMatchesSynced = new Map(m.map(x => [x.id, x]));
+  _idbPitsSynced = new Map(p.map(x => [x.id, x]));
+  return { matches: m, pits: p };
 }
 
 // Collision-safe entry id. crypto.randomUUID() requires a secure context,
@@ -2304,11 +2496,15 @@ async function migratePitEntryFull(p) {
 }
 async function runMigration() {
   let changed = false;
-  for (const m of matches) { if (await migrateEntryFull(m)) changed = true; }
-  for (const p of pits) { if (await migratePitEntryFull(p)) changed = true; }
+  // Each migrateXToY() mutates its entry IN PLACE (same object reference
+  // in matches/pits before and after) — markEntryDirty() is what makes
+  // idbSyncStore() actually notice and write it; reference equality
+  // alone would silently skip every migrated entry.
+  for (const m of matches) { if (await migrateEntryFull(m)) { changed = true; markEntryDirty(m); } }
+  for (const p of pits) { if (await migratePitEntryFull(p)) { changed = true; markEntryDirty(p); } }
   if (changed) {
-    const okM = save(LS_MATCHES, matches);
-    const okP = save(LS_PIT, pits);
+    const okM = await save(LS_MATCHES, matches);
+    const okP = await save(LS_PIT, pits);
     if (okM && okP) { clearSaveError(); console.log('Migration complete'); }
     else console.error('Migration save failed — will retry next load');
   }
@@ -2404,8 +2600,33 @@ function pitDraftHasData(d) {
 function matchKeyOf(m) { return `${m.matchType || 'Qualification'}|${m.matchNumber}|${m.eventCode || ''}`; }
 function matchLabelOf(m) { return `${m.matchType || 'Qualification'} ${m.matchNumber}`; }
 
+// A plain .filter() here is O(n) per call, and this gets called once per
+// entry while computing team stats across a whole event (teamAverages()
+// -> computeTeamStats() -> computeEstimate() -> here) — O(n) x n entries
+// is O(n^2), which is exactly what made the Data tabs slow at 2,000+
+// matches. Indexed once per distinct `allMatches` ARRAY REFERENCE instead
+// (every save in this file reassigns matches/pits to a brand-new array —
+// matches.map(...)/matches.filter(...)/matches = next — so the reference
+// itself is a free, already-correct "has anything changed" signal; no
+// separate dirty-tracking needed). The index rebuilds once, on whichever
+// call first sees a new reference, then every other call against that
+// SAME reference (the common case: one teamAverages() pass touches every
+// entry against the same `matches` array) is an O(1) map lookup instead
+// of an O(n) scan.
+let _allianceIndexCache = null; // { forArray, map: Map<matchKey|alliance, entries[]> }
+function allianceIndexFor(allMatches) {
+  if (_allianceIndexCache && _allianceIndexCache.forArray === allMatches) return _allianceIndexCache.map;
+  const map = new Map();
+  for (const e of allMatches) {
+    const key = matchKeyOf(e) + '|' + e.alliance;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(e);
+  }
+  _allianceIndexCache = { forArray: allMatches, map };
+  return map;
+}
 function allianceEntriesFor(allMatches, m) {
-  return allMatches.filter(e => matchKeyOf(e) === matchKeyOf(m) && e.alliance === m.alliance);
+  return allianceIndexFor(allMatches).get(matchKeyOf(m) + '|' + m.alliance) || [];
 }
 // One entry per distinct team number in a list (first by timestamp) —
 // collapses accidental duplicate-scouting of the same robot before
@@ -2701,11 +2922,19 @@ function renderUntaggedEntriesBanner() {
   document.getElementById('untaggedEntriesText').textContent = `Assign ${n} untagged ${n === 1 ? 'entry' : 'entries'} to ${label}`;
   banner.style.display = 'flex';
 }
-document.getElementById('assignUntaggedBtn').addEventListener('click', () => {
+document.getElementById('assignUntaggedBtn').addEventListener('click', async () => {
   const n = untaggedEntries().length;
   untaggedEntries().forEach(stampCurrentEvent);
-  save(LS_MATCHES, matches);
-  save(LS_PIT, pits);
+  // stampCurrentEvent() mutates eventCode/season IN PLACE — matchKeyOf()
+  // (and therefore the alliance index) and the team-averages cache both
+  // key off the matches/pits ARRAY reference to know when to recompute,
+  // so a same-reference in-place mutation would otherwise go unnoticed.
+  // Reassigning to a fresh top-level array (same entries, new reference)
+  // is the cheap way to force both caches to see this as changed.
+  matches = matches.slice();
+  pits = pits.slice();
+  await save(LS_MATCHES, matches);
+  await save(LS_PIT, pits);
   showToast(`${n} ${n === 1 ? 'entry' : 'entries'} assigned to ${eventData.eventName || eventData.eventCode}`);
   renderData();
 });
@@ -3070,7 +3299,7 @@ async function performActualSave() {
         sessionId: accountSession ? accountSession.sessionId : '' };
       next = [...matches, savedEntry];
     }
-    const ok = save(LS_MATCHES, next);
+    const ok = await save(LS_MATCHES, next);
     if (!ok) { showToast('Save failed — see banner above', true); return; } // draft untouched, nothing reset
     matches = next;
     if (oldEntry && oldEntry.autoPathId && oldEntry.autoPathId !== autoPathId) {
@@ -3753,7 +3982,7 @@ document.getElementById('savePitBtn').addEventListener('click', async () => {
       entry = { ...pitDraft, schemaVersion: 7, id: newEntryId(), ts: now, updatedAt: now, scouter: tagScouterName, scouterId: tagScouterId, deviceId: tagDeviceId, sessionId: tagSessionId, sent: false };
       next = [...pits, entry];
     }
-    const ok = save(LS_PIT, next);
+    const ok = await save(LS_PIT, next);
     if (!ok) { showToast('Save failed — see banner above', true); return; }
     pits = next;
     clearSaveError();
@@ -3812,7 +4041,7 @@ function renderData() {
 async function performDeleteMatch(id) {
   const entry = matches.find(m => String(m.id) === String(id));
   matches = matches.filter(m => String(m.id) !== String(id));
-  save(LS_MATCHES, matches);
+  await save(LS_MATCHES, matches);
   if (entry && entry.autoPathId) {
     try { await idbDeleteImage(entry.autoPathId); imgCache.delete(entry.autoPathId); }
     catch (err) { console.error('Failed to delete image for match ' + id, err); }
@@ -3827,7 +4056,7 @@ function deleteMatch(id) {
 async function performDeletePit(id) {
   const entry = pits.find(p => String(p.id) === String(id));
   pits = pits.filter(p => String(p.id) !== String(id));
-  save(LS_PIT, pits);
+  await save(LS_PIT, pits);
   if (entry && Array.isArray(entry.photoIds)) {
     for (const pid of entry.photoIds) {
       try { await idbDeleteImage(pid); imgCache.delete(pid); }
@@ -3896,14 +4125,34 @@ function renderMatchList() {
 // Practice matches are excluded from this (and therefore from Averages,
 // By-Team stats, and the Picker, which all consume this) unless the
 // "Include Practice" toggle on the Data page is on.
+// Cached per the Data-page performance requirement: recomputed only when
+// something it actually depends on changes. `matches`'s ARRAY REFERENCE
+// (reassigned on every save, same reasoning as allianceIndexFor() above)
+// stands in for "the data changed"; `schedule`'s reference too (always
+// reassigned, never mutated in place, elsewhere in this file) — a Setup
+// QR re-import can correct the schedule mid-event, which changes
+// reconcileAlliance()'s slot-based candidate selection even when no
+// match itself changed. The remaining three inputs rankableMatches()
+// reads are cheap to compare directly. Re-rendering the SAME tab, sorting
+// a column, or switching to a different Data sub-tab and back all hit
+// this cache instead of re-running computeTeamStats() for every team.
+let _teamAveragesCache = null; // { matchesRef, scheduleRef, includePractice, viewEventFilter, eventCode, result }
 function teamAverages() {
+  const key = { matchesRef: matches, scheduleRef: schedule, includePractice, viewEventFilter, eventCode: eventData.eventCode };
+  const c = _teamAveragesCache;
+  if (c && c.matchesRef === key.matchesRef && c.scheduleRef === key.scheduleRef && c.includePractice === key.includePractice &&
+      c.viewEventFilter === key.viewEventFilter && c.eventCode === key.eventCode) {
+    return c.result.slice(); // callers sort this array in place (e.g. renderAverages) — never hand out the cached array itself
+  }
   const pool = rankableMatches();
   const byTeam = {};
   pool.forEach(m => {
-    const key = normTeam(m.teamNumber);
-    (byTeam[key] = byTeam[key] || []).push(m);
+    const k = normTeam(m.teamNumber);
+    (byTeam[k] = byTeam[k] || []).push(m);
   });
-  return Object.values(byTeam).map(entries => computeTeamStats(entries));
+  const result = Object.values(byTeam).map(entries => computeTeamStats(entries));
+  _teamAveragesCache = { ...key, result };
+  return result.slice();
 }
 
 // Official (FTCScout) numbers, as opposed to everything else in this table
@@ -4777,8 +5026,8 @@ document.getElementById('importJsonInput').addEventListener('change', async (e) 
     const text = await file.text();
     const data = JSON.parse(text);
     const { newM, updM, dupM, newP, updP, dupP } = await mergeImportedData(data);
-    const okM = save(LS_MATCHES, matches);
-    const okP = save(LS_PIT, pits);
+    const okM = await save(LS_MATCHES, matches);
+    const okP = await save(LS_PIT, pits);
     if (!okM || !okP) { showToast('Import partially failed — see banner above', true); renderData(); return; }
     clearSaveError();
     showToast(`Imported: ${newM + newP} new, ${updM + updP} updated, ${dupM + dupP} already up to date`);
@@ -4823,6 +5072,14 @@ async function wipeDeviceCompletely() {
   });
   try { await idbClearAllImages(); } catch (err) { console.error('Failed to clear image store', err); }
   try { await idbClearEventCache(); } catch (err) { console.error('Failed to clear event cache store', err); }
+  // Matches/pits now live in IndexedDB too (see MATCHES/PITS STORAGE) —
+  // without this, "every match and pit entry" in the warning above would
+  // be a lie: the prefix sweep above only ever touched localStorage, and
+  // post-Round-E that's no longer where this data lives.
+  try { await idbClearStore(IDB_MATCHES_STORE); } catch (err) { console.error('Failed to clear matches store', err); }
+  try { await idbClearStore(IDB_PITS_STORE); } catch (err) { console.error('Failed to clear pits store', err); }
+  _idbMatchesSynced = new Map();
+  _idbPitsSynced = new Map();
   // "Reset this device signs out... but never deletes the online account" —
   // the scouter/scouters doc itself is untouched; this only clears the
   // Firebase Auth SDK's OWN local session (separate from the
@@ -4870,13 +5127,23 @@ function renderPersistStatus() {
 
 async function renderStorageUsage() {
   const el = document.getElementById('storageUsage');
+  const warnEl = document.getElementById('storageWarning');
   if (!el) return;
+  if (warnEl) warnEl.style.display = 'none';
   if (navigator.storage && navigator.storage.estimate) {
     try {
       const est = await navigator.storage.estimate();
       const usedMB = ((est.usage || 0) / 1048576).toFixed(1);
       const quotaMB = ((est.quota || 0) / 1048576).toFixed(0);
-      el.textContent = `Using ~${usedMB} MB of ~${quotaMB} MB available on this device.`;
+      const pct = est.quota ? (est.usage || 0) / est.quota * 100 : 0;
+      el.textContent = `Using ~${usedMB} MB of ~${quotaMB} MB available on this device (${pct.toFixed(0)}%).`;
+      // 70% is a heads-up, not a hard block — IndexedDB (matches/pits live
+      // there now) has a much higher ceiling than the old 5MB localStorage
+      // cap this is meant to warn well ahead of, not scrape against.
+      if (warnEl && pct >= 70) {
+        warnEl.textContent = `⚠ Storage is ${pct.toFixed(0)}% full — back up this device and consider clearing sent entries from past events soon.`;
+        warnEl.style.display = 'block';
+      }
     } catch (err) {
       el.textContent = 'Storage usage unavailable.';
     }
@@ -6543,6 +6810,11 @@ function saveEventData() { try { localStorage.setItem(LS_EVENTDATA, JSON.stringi
 function stampCurrentEvent(obj) {
   obj.eventCode = eventData.eventCode || '';
   obj.season = eventData.season || null;
+  // Mutates in place — markEntryDirty() is how idbSyncStore() still
+  // notices the change when this retags an EXISTING match/pit (the
+  // "Assign untagged entries" banner). A harmless no-op for a fresh
+  // draft/pitDraft, which never gets passed to idbSyncStore anyway.
+  markEntryDirty(obj);
 }
 // Team list for Setup QR / pit suggestions: prefer FTCScout's fetched
 // roster when present, otherwise derive it from whichever team numbers
@@ -7659,13 +7931,13 @@ document.getElementById('qrCloseBtn').addEventListener('click', () => {
   setQrAutoAdvance(false);
   document.getElementById('qrOverlay').style.display = 'none';
 });
-document.getElementById('qrMarkSentBtn').addEventListener('click', () => {
+document.getElementById('qrMarkSentBtn').addEventListener('click', async () => {
   const ids = new Set(qrState.entryIds);
   const pitIds = new Set(qrState.pitIds);
   matches = matches.map(m => ids.has(String(m.id)) ? { ...m, sent: true } : m);
   pits = pits.map(p => pitIds.has(String(p.id)) ? { ...p, sent: true } : p);
-  save(LS_MATCHES, matches);
-  save(LS_PIT, pits);
+  await save(LS_MATCHES, matches);
+  await save(LS_PIT, pits);
   showToast('Marked as sent');
   document.getElementById('qrOverlay').style.display = 'none';
   renderData();
@@ -7756,16 +8028,25 @@ async function handleImportPart(sessionId, partNum, total, dataChunk) {
   for (const e of fullEntries) await migrateEntryFull(e);
   const rm = mergeEntriesByUpdatedAt(matches, checkReceivedEntries(fullEntries));
   matches = rm.merged;
-  save(LS_MATCHES, matches);
+  const okM = await save(LS_MATCHES, matches);
 
   const fullPits = (payload.p || []).map(expandPit);
   for (const p of fullPits) await migratePitEntryFull(p);
   const rp = mergeEntriesByUpdatedAt(pits, checkReceivedEntries(fullPits));
   pits = rp.merged;
-  save(LS_PIT, pits);
+  const okP = await save(LS_PIT, pits);
 
   renderData();
   updateUnsentCount();
+  // Never report this QR receive as a success if the save didn't
+  // actually land — the merge already happened in memory (harmless to
+  // leave as-is; re-scanning the same QR just re-merges, which this
+  // merge-by-updatedAt is already idempotent against), but the lead's
+  // own screen must show an error, not a false "N new, M updated", so
+  // the scouter watching it knows NOT to mark their data sent yet.
+  if (!okM || !okP) {
+    return { complete: true, error: 'Not saved — try scanning again', saveFailed: true };
+  }
   return {
     complete: true,
     added: rm.added + rp.added, updated: rm.updated + rp.updated, skipped: rm.skipped + rp.skipped,
@@ -8330,7 +8611,10 @@ async function handleScannedUrl(text) {
   document.getElementById('scannerStatus').textContent = result.complete
     ? (result.error || resetResultMessage(result) || (result.setup ? 'Event setup loaded' : `Done: ${result.added} new, ${result.updated} updated, ${result.skipped} already up to date`))
     : `${result.received} of ${result.total} received — keep scanning`;
-  if (result.complete) { setTimeout(stopQrScanner, 1500); if (result.join) renderScoutersScreenIfOpen(); }
+  // A save failure stays on screen (no auto-close) so the lead can
+  // immediately retry by re-scanning, instead of the scanner closing as
+  // if it had actually finished.
+  if (result.complete && !result.saveFailed) { setTimeout(stopQrScanner, 1500); if (result.join) renderScoutersScreenIfOpen(); }
 }
 document.getElementById('scanQrBtn').addEventListener('click', startQrScanner);
 document.getElementById('scannerCloseBtn').addEventListener('click', stopQrScanner);
@@ -9339,7 +9623,7 @@ async function runSelfTests() {
       const realSetItem = Storage.prototype.setItem;
       Storage.prototype.setItem = () => { throw new DOMException('Quota exceeded', 'QuotaExceededError'); };
       clearSaveError();
-      const ok = save('selftest_key', { x: 1 });
+      const ok = await save('selftest_key', { x: 1 });
       const bannerVisible = document.getElementById('saveError').style.display === 'block';
       Storage.prototype.setItem = realSetItem;
       clearSaveError();
@@ -10960,7 +11244,7 @@ async function runSelfTests() {
       let noLsKeyOk, totalBytesOk, idbRoundTripOk, migrationOk, totalBytes;
       try {
         matches = []; pits = [];
-        save(LS_MATCHES, matches); save(LS_PIT, pits);
+        await save(LS_MATCHES, matches); await save(LS_PIT, pits);
 
         // A realistically-sized whole-season fetch — real FTC seasons run
         // ~1700 events; 500 is enough to be well past what used to make
@@ -10997,7 +11281,7 @@ async function runSelfTests() {
       } finally {
         window.fetch = origFetch;
         matches = savedMatches; pits = savedPits;
-        save(LS_MATCHES, matches); save(LS_PIT, pits);
+        await save(LS_MATCHES, matches); await save(LS_PIT, pits);
         allEventsCache = savedAllCache;
         try { if (savedAllCache) await idbPutEventCache(savedAllCache); else await idbClearEventCache(); } catch(e) {}
       }
@@ -11005,6 +11289,196 @@ async function runSelfTests() {
       record('Event Picker season cache: IndexedDB not localStorage (no LS key, <200KB total with 0 matches, IDB round-trip, legacy LS copy migrates then is removed)', pass,
         JSON.stringify({ noLsKeyOk, totalBytesOk, idbRoundTripOk, migrationOk, totalBytes }));
     } catch (err) { record('Event Picker season cache: IndexedDB not localStorage (no LS key, <200KB total with 0 matches, IDB round-trip, legacy LS copy migrates then is removed)', false, err.message); }
+
+    // Matches/pits IndexedDB migration: 1,000 pre-existing localStorage
+    // matches (+ 20 pits) move over with no data loss, old keys removed,
+    // migrated flag set. See the storage-ceiling fix — matches/pits used
+    // to live in ONE localStorage blob each, capped by the ~5MB/site quota.
+    try {
+      const savedMatches = matches, savedPits = pits;
+      let lsClearedOk, flagSetOk, migratedCountOk, noLossOk;
+      try {
+        await idbClearStore(IDB_MATCHES_STORE);
+        await idbClearStore(IDB_PITS_STORE);
+        _idbMatchesSynced = new Map();
+        _idbPitsSynced = new Map();
+        const fixtureMatches = Array.from({ length: 1000 }, (_, i) => ({
+          id: `migtest-m-${i}`, schemaVersion: 9, teamNumber: String(1000 + (i % 40)), matchNumber: String(i + 1),
+          matchType: 'Qualification', alliance: i % 2 ? 'red' : 'blue', ts: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          sent: false, eventCode: 'MIGTEST',
+        }));
+        const fixturePits = Array.from({ length: 20 }, (_, i) => ({
+          id: `migtest-p-${i}`, schemaVersion: 7, teamNumber: String(1000 + i), ts: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          eventCode: 'MIGTEST',
+        }));
+        localStorage.setItem(LS_MATCHES, JSON.stringify(fixtureMatches));
+        localStorage.setItem(LS_PIT, JSON.stringify(fixturePits));
+        localStorage.removeItem(LS_MIGRATED_TO_IDB);
+
+        await migrateMatchesAndPitsToIDB();
+
+        lsClearedOk = localStorage.getItem(LS_MATCHES) === null && localStorage.getItem(LS_PIT) === null;
+        flagSetOk = localStorage.getItem(LS_MIGRATED_TO_IDB) === '1';
+        const idbM = await idbGetAllMatches();
+        const idbP = await idbGetAllPits();
+        migratedCountOk = idbM.length === 1000 && idbP.length === 20;
+        const idbMIds = new Set(idbM.map(m => m.id));
+        const idbPIds = new Set(idbP.map(p => p.id));
+        noLossOk = fixtureMatches.every(m => idbMIds.has(m.id)) && fixturePits.every(p => idbPIds.has(p.id));
+      } finally {
+        await idbClearStore(IDB_MATCHES_STORE);
+        await idbClearStore(IDB_PITS_STORE);
+        _idbMatchesSynced = new Map();
+        _idbPitsSynced = new Map();
+        matches = savedMatches; pits = savedPits;
+        localStorage.setItem(LS_MIGRATED_TO_IDB, '1'); // this device really is already migrated — restore that fact
+        await save(LS_MATCHES, matches); await save(LS_PIT, pits);
+      }
+      const pass = lsClearedOk && flagSetOk && migratedCountOk && noLossOk;
+      record('IndexedDB migration: 1,000 pre-existing localStorage matches + 20 pits move over with no data loss, old keys removed, migrated flag set', pass,
+        JSON.stringify({ lsClearedOk, flagSetOk, migratedCountOk, noLossOk }));
+    } catch (err) { record('IndexedDB migration: 1,000 pre-existing localStorage matches + 20 pits move over with no data loss, old keys removed, migrated flag set', false, err.message); }
+
+    // Save/reopen with 3,000 matches: a full season's worth and then some
+    // (well past the old localStorage ceiling) still round-trips exactly,
+    // and in reasonable time (generous bound — a correctness/non-regression
+    // guard, not a tight perf budget; see the alliance-index + teamAverages
+    // cache fix below for the actual Data-tab speed fix).
+    try {
+      const savedMatches = matches;
+      let roundTripOk, contentOk, fastEnoughOk, elapsedMs;
+      try {
+        await idbClearStore(IDB_MATCHES_STORE);
+        _idbMatchesSynced = new Map();
+        const bigMatches = Array.from({ length: 3000 }, (_, i) => ({
+          id: `bigtest-${i}`, schemaVersion: 9, teamNumber: String(1000 + (i % 60)), matchNumber: String((i % 120) + 1),
+          matchType: 'Qualification', alliance: i % 2 ? 'red' : 'blue', ts: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          sent: false, eventCode: 'BIGTEST', autoTips: i % 5, teleopTips: i % 7, leave: i % 2 === 0,
+        }));
+        matches = bigMatches;
+        const t0 = performance.now();
+        const ok = await save(LS_MATCHES, matches);
+        const reread = await idbGetAllMatches();
+        elapsedMs = performance.now() - t0;
+        roundTripOk = ok && reread.length === 3000;
+        const rereadIds = new Set(reread.map(m => m.id));
+        contentOk = bigMatches.every(m => rereadIds.has(m.id)) && reread.every(m => m.eventCode === 'BIGTEST');
+        fastEnoughOk = elapsedMs < 5000;
+      } finally {
+        await idbClearStore(IDB_MATCHES_STORE);
+        _idbMatchesSynced = new Map();
+        matches = savedMatches;
+        await save(LS_MATCHES, matches);
+      }
+      const pass = roundTripOk && contentOk && fastEnoughOk;
+      record('IndexedDB save/reopen round-trips 3,000 matches intact (save, then re-read fresh from IndexedDB)', pass,
+        JSON.stringify({ roundTripOk, contentOk, fastEnoughOk, elapsedMs: Math.round(elapsedMs) }));
+    } catch (err) { record('IndexedDB save/reopen round-trips 3,000 matches intact (save, then re-read fresh from IndexedDB)', false, err.message); }
+
+    // Quota-full path: a simulated IndexedDB write failure (idbSyncStore
+    // rejecting, standing in for a real QuotaExceededError) makes save()
+    // return false and show the NOT SAVED banner — and separately, a QR
+    // receive that hits the same failure never reports success, so the
+    // sending scouter's device keeps the data for a retry instead of
+    // marking it sent.
+    try {
+      const origIdbSyncStore = idbSyncStore;
+      let saveFailedOk, bannerShownOk, bannerClearsAfterOk;
+      let qrFailedOk, qrRetrySucceedsOk;
+      try {
+        clearSaveError();
+        idbSyncStore = () => Promise.reject(new Error('QuotaExceededError (simulated)'));
+        const ok = await save(LS_MATCHES, matches);
+        saveFailedOk = ok === false;
+        bannerShownOk = document.getElementById('saveError').style.display === 'block';
+
+        const qrOriginal = {
+          id: 'quotafailtest1', schemaVersion: 9, matchType: 'Qualification', matchNumber: '950', teamNumber: '9150', alliance: 'blue',
+          ts: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', sent: false, autoPathStrokes: [],
+        };
+        const { b64url, compressed } = await encodeEntriesForQr([qrOriginal], []);
+        const sessionId = (compressed ? 'g' : 'r') + 'selftestquotafail';
+        const parts = buildQrUrls(sessionId, b64url).map(u => {
+          const bits = u.split('#import=')[1].split('.');
+          return { sessionId: bits[0], part: Number(bits[1]), total: Number(bits[2]), data: bits.slice(3).join('.') };
+        });
+        let failResult;
+        for (const p of parts) failResult = await handleImportPart(p.sessionId, p.part, p.total, p.data);
+        qrFailedOk = !!failResult && failResult.complete && !!failResult.error && failResult.saveFailed === true;
+
+        idbSyncStore = origIdbSyncStore;
+        clearSaveError();
+        let retryResult;
+        for (const p of parts) retryResult = await handleImportPart(p.sessionId, p.part, p.total, p.data);
+        // The merge into memory already happened on the FAILED attempt
+        // above (matches = rm.merged runs before the save result is even
+        // checked — see handleImportPart) — only the save itself needed
+        // to actually succeed this time, so this re-scan re-merges the
+        // same entry (added on the failed attempt, skipped here since its
+        // updatedAt isn't newer) rather than adding it again.
+        qrRetrySucceedsOk = !!retryResult && retryResult.complete && !retryResult.error &&
+          !!matches.find(m => m.id === 'quotafailtest1');
+        bannerClearsAfterOk = document.getElementById('saveError').style.display !== 'block';
+      } finally {
+        idbSyncStore = origIdbSyncStore;
+        clearSaveError();
+        matches = matches.filter(m => m.id !== 'quotafailtest1');
+      }
+      const pass = saveFailedOk && bannerShownOk && qrFailedOk && qrRetrySucceedsOk && bannerClearsAfterOk;
+      record('Simulated IndexedDB quota failure: save() returns false + shows NOT SAVED banner; a QR receive hitting the same failure reports an error (never a silent success), and a retry afterward lands cleanly', pass,
+        JSON.stringify({ saveFailedOk, bannerShownOk, qrFailedOk, qrRetrySucceedsOk, bannerClearsAfterOk }));
+    } catch (err) { record('Simulated IndexedDB quota failure: save() returns false + shows NOT SAVED banner; a QR receive hitting the same failure reports an error (never a silent success), and a retry afterward lands cleanly', false, err.message); }
+
+    // Interrupted migration: a crash after matches write but before pits
+    // write (idbPutAll rejecting for the pits store only) must leave
+    // localStorage COMPLETELY intact and the migrated flag unset — never a
+    // half-migrated state — and a retry (what the next page load does)
+    // must then complete cleanly.
+    try {
+      const savedMatches = matches, savedPits = pits;
+      let lsIntactAfterInterruptOk, flagNotSetOk, retrySucceedsOk;
+      try {
+        await idbClearStore(IDB_MATCHES_STORE);
+        await idbClearStore(IDB_PITS_STORE);
+        _idbMatchesSynced = new Map();
+        _idbPitsSynced = new Map();
+        const fixtureMatches = Array.from({ length: 50 }, (_, i) => ({
+          id: `inttest-m-${i}`, schemaVersion: 9, teamNumber: String(2000 + i), matchNumber: String(i + 1),
+          matchType: 'Qualification', alliance: i % 2 ? 'red' : 'blue', ts: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          sent: false, eventCode: 'INTTEST',
+        }));
+        const fixturePits = [{ id: 'inttest-p-0', schemaVersion: 7, teamNumber: '2000', ts: new Date().toISOString(), updatedAt: new Date().toISOString(), eventCode: 'INTTEST' }];
+        const fixtureMatchesJson = JSON.stringify(fixtureMatches), fixturePitsJson = JSON.stringify(fixturePits);
+        localStorage.setItem(LS_MATCHES, fixtureMatchesJson);
+        localStorage.setItem(LS_PIT, fixturePitsJson);
+        localStorage.removeItem(LS_MIGRATED_TO_IDB);
+
+        const origIdbPutAll = idbPutAll;
+        idbPutAll = (storeName, arr) => storeName === IDB_PITS_STORE ? Promise.reject(new Error('Simulated crash')) : origIdbPutAll(storeName, arr);
+        try { await migrateMatchesAndPitsToIDB(); } finally { idbPutAll = origIdbPutAll; }
+
+        lsIntactAfterInterruptOk = localStorage.getItem(LS_MATCHES) === fixtureMatchesJson && localStorage.getItem(LS_PIT) === fixturePitsJson;
+        flagNotSetOk = localStorage.getItem(LS_MIGRATED_TO_IDB) !== '1';
+
+        // Retry with the crash removed — must now succeed cleanly.
+        await migrateMatchesAndPitsToIDB();
+        const idbM = await idbGetAllMatches();
+        const idbP = await idbGetAllPits();
+        retrySucceedsOk = localStorage.getItem(LS_MATCHES) === null && localStorage.getItem(LS_PIT) === null &&
+          localStorage.getItem(LS_MIGRATED_TO_IDB) === '1' && idbM.length === 50 && idbP.length === 1;
+      } finally {
+        await idbClearStore(IDB_MATCHES_STORE);
+        await idbClearStore(IDB_PITS_STORE);
+        _idbMatchesSynced = new Map();
+        _idbPitsSynced = new Map();
+        matches = savedMatches; pits = savedPits;
+        localStorage.setItem(LS_MIGRATED_TO_IDB, '1');
+        await save(LS_MATCHES, matches); await save(LS_PIT, pits);
+      }
+      const pass = lsIntactAfterInterruptOk && flagNotSetOk && retrySucceedsOk;
+      record('Interrupted migration (crash after matches write, before pits write) leaves localStorage fully intact and unmigrated; a retry on the next load completes cleanly', pass,
+        JSON.stringify({ lsIntactAfterInterruptOk, flagNotSetOk, retrySucceedsOk }));
+    } catch (err) { record('Interrupted migration (crash after matches write, before pits write) leaves localStorage fully intact and unmigrated; a retry on the next load completes cleanly', false, err.message); }
 
     // Setup QR round trip via #import= parts: schedule/team list import,
     // Who-Are-You shown, and re-importing a CHANGED setup QR replaces the
@@ -12088,8 +12562,8 @@ async function runSelfTests() {
     // Restore real state exactly as it was before any test ran.
     matches = snapshot.matches;
     pits = snapshot.pits;
-    save(LS_MATCHES, matches);
-    save(LS_PIT, pits);
+    await save(LS_MATCHES, matches);
+    await save(LS_PIT, pits);
     try { if (snapshot.lsDraft !== null) localStorage.setItem(LS_DRAFT, snapshot.lsDraft); else localStorage.removeItem(LS_DRAFT); } catch (e) {}
     try { if (snapshot.lsPitDraft !== null) localStorage.setItem(LS_PITDRAFT, snapshot.lsPitDraft); else localStorage.removeItem(LS_PITDRAFT); } catch (e) {}
     try { if (snapshot.draftInk) await idbPutImage(DRAFT_INK_ID, snapshot.draftInk); else await idbDeleteImage(DRAFT_INK_ID); } catch (e) {}
@@ -12167,6 +12641,11 @@ async function runSelfTests() {
 
 /* ══════════ INIT ══════════ */
 (async function init() {
+  // Must happen before ANYTHING else touches matches/pits (schema
+  // migration, rendering, etc. all assume these are already populated) —
+  // this is the one-time localStorage->IndexedDB migration plus the
+  // actual load, previously a synchronous top-level statement.
+  ({ matches, pits } = await loadMatchesAndPitsFromIDB());
   await requestPersistentStorage();
   await runMigration();
   await migrateEventCacheToIdb();
